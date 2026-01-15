@@ -1,0 +1,49 @@
+gcp:
+  project_id: "dataland-backend"
+  dataset_id: "dl_staging"
+  credentials_file: "/Users/alex/dataland-backend-rdc-bq-bridge-sa-2dfde8a1840f.json"
+
+redis:
+  #   url: "redis://localhost:6379/0"
+  # host: "10.23.104.21"
+  host: "localhost"
+  port: 6379
+  # username: "default"
+  # password: "DADmin#100"
+
+pipeline:
+  routing_rules:
+    - name: "BioSensors"
+      redis_source_type: "channel"
+      redis_pattern: "Wearables:WatchDevices:*:BioSensors"
+      target_table: "visitor_events"
+      id_parser_regex: "Wearables:WatchDevices:(?P<device_id>[^:]+):BioSensors"
+      column_name: "bio_sensors"
+      value_is_object: true
+    - name: "Position"
+      redis_source_type: "channel"
+      redis_pattern: "Wearables:WatchDevices:*:BlueIoTSensors"
+      target_table: "visitor_events"
+      id_parser_regex: "Wearables:WatchDevices:(?P<device_id>[^:]+):BlueIoTSensors"
+      column_name: "position" # Will need parsing for x, y
+      value_is_object: true
+#     - name: "GlobalState"
+#       redis_source_type: "key"
+#       redis_pattern: "*" # fallback
+#       target_table: "global_state_events"
+#       id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+#       value_is_object: false
+
+assembly:
+  row_assembly_timeout_seconds: 5.0
+  aggregation_rules:
+    visitor_events:
+      heart_rate: "average"
+      skin_conductivity: "average"
+      skin_temperature: "average"
+      default: "last"
+
+loader:
+  batch_size_rows: 500
+  batch_size_bytes: 1000000
+  commit_interval_seconds: 1.0

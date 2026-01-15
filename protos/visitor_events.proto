@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package rdc_bridge;
+
+// Message for visitor events table
+message VisitorEventsRow {
+  // Event timestamp (required)
+  string event_timestamp = 1;
+  
+  // Device identification (required)
+  string device_id = 2;
+  
+  // Visitor identification (optional)
+  string ticket_id = 3;
+  
+  // Position data (optional)
+  double position_x = 4;
+  double position_y = 5;
+  string zone = 6;
+  
+  // Biometric data (optional)
+  double heart_rate = 7;
+  double skin_conductivity = 8;
+  double skin_temperature = 9;
+  
+  // Accelerometer data (optional)
+  double accelerometer_x = 10;
+  double accelerometer_y = 11;
+  double accelerometer_z = 12;
+}
+
+// Message for global state events table
+message GlobalStateEventsRow {
+  // Event timestamp (required)
+  string event_timestamp = 1;
+  
+  // State key (required)
+  string state_key = 2;
+  
+  // State value (optional)
+  string state_value = 3;
+}
+

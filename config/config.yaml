@@ -1,0 +1,300 @@
+# GCP Configuration
+gcp:
+  project_id: "dataland-backend"
+  dataset_id: "dl_staging_3"
+  credentials_file: "/home/alex/dataland-backend-rdc-bq-bridge-sa-2dfde8a1840f.json"
+
+# Configuration for RDC-BigQuery Bridge
+
+redis:
+  # host: "localhost"
+  host: "10.23.104.21"
+  port: 6379
+  db: 0
+  # password: null
+  user: default
+  password: DADmin#100
+  decode_responses: false
+  socket_keepalive: true
+  socket_keepalive_options:
+    TCP_KEEPIDLE: 120
+    TCP_KEEPINTVL: 30
+    TCP_KEEPCNT: 3
+
+pipeline:
+  routing_rules:
+    - name: "BioSensors"
+      redis_source_type: "channel"
+      redis_pattern: "Wearables:WatchDevices:*:BioSensors"
+      target_table: "empatica"
+      id_parser_regex: "Wearables:WatchDevices:(?P<device_id>[^:]+):BioSensors"
+      value_is_object: true
+
+    - name: "Position"
+      redis_source_type: "channel"
+      redis_pattern: "Wearables:WatchDevices:*:BlueIoTSensors"
+      target_table: "blueiot"
+      id_parser_regex: "Wearables:WatchDevices:(?P<device_id>[^:]+):BlueIoTSensors"
+      value_is_object: true
+
+    - name: "Scent"
+      redis_source_type: "key"
+      redis_pattern: "Wearables:Scent:*"
+      target_table: "global_state_events"
+      id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+      value_is_object: false
+
+    - name: "WatchDevices"
+      redis_source_type: "key"
+      redis_pattern: "Wearables:WatchDevices:*"
+      target_table: "global_state_events"
+      id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+      value_is_object: false
+
+    - name: "VisitorRegister"
+      redis_source_type: "channel"
+      redis_pattern: "Visitors:Register"
+      target_table: "global_state_events"
+      id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+      value_is_object: true
+
+    - name: "VisitorStatus"
+      redis_source_type: "key"
+      redis_pattern: "Visitors:*:Status"
+      target_table: "global_state_events"
+      id_parser_regex: "Visitors:(?P<ticket_id>[^:]+):Status"
+      value_is_object: false
+
+    - name: "VisitorEmpaticaDevice"
+      redis_source_type: "key"
+      redis_pattern: "Visitors:*:EmpaticaDeviceID"
+      target_table: "global_state_events"
+      id_parser_regex: "Visitors:(?P<ticket_id>[^:]+):EmpaticaDeviceID"
+      value_is_object: false
+
+    - name: "VisitorEmpaticaDeviceShort"
+      redis_source_type: "key"
+      redis_pattern: "Visitors:*:EmpaticaDeviceIDShort"
+      target_table: "global_state_events"
+      id_parser_regex: "Visitors:(?P<ticket_id>[^:]+):EmpaticaDeviceIDShort"
+      value_is_object: false
+
+    - name: "VisitorScentDevice"
+      redis_source_type: "key"
+      redis_pattern: "Visitors:*:ScentDeviceID"
+      target_table: "global_state_events"
+      id_parser_regex: "Visitors:(?P<ticket_id>[^:]+):ScentDeviceID"
+      value_is_object: false
+
+    - name: "VisitorETemp"
+      redis_source_type: "key"
+      redis_pattern: "Visitors:*:ETemp"
+      target_table: "global_state_events"
+      id_parser_regex: "Visitors:(?P<ticket_id>[^:]+):ETemp"
+      value_is_object: false
+
+    - name: "IO"
+      redis_source_type: "key"
+      redis_pattern: "IO:*"
+      target_table: "global_state_events"
+      id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+      value_is_object: true
+
+    - name: "KiosksDeviceAssignments"
+      redis_source_type: "key"
+      redis_pattern: "Rooms:*:Stage Data:*:*Device ID"
+      target_table: "global_state_events"
+      id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+      value_is_object: false
+
+    - name: "RoomsSceneName"
+      redis_source_type: "key"
+      redis_pattern: "Rooms:*:Scene Name:*"
+      target_table: "global_state_events"
+      id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+      value_is_object: false
+
+    - name: "Rooms"
+      redis_source_type: "key"
+      redis_pattern: "Rooms:*"
+      target_table: "global_state_events"
+      id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+      value_is_object: true
+
+    - name: "Galleries"
+      redis_source_type: "key"
+      redis_pattern: "Galleries:*"
+      target_table: "global_state_events"
+      id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+      value_is_object: false
+
+#     - name: "Everything"
+#       redis_source_type: "key"
+#       redis_pattern: "*"
+#       target_table: "global_state_events"
+#       id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+#       value_is_object: true
+#
+#     - name: "Everything Pub/Sub"
+#       redis_source_type: "channel"
+#       redis_pattern: "*"
+#       target_table: "global_state_events"
+#       id_parser_regex: "(?P<state_key>.*)" # Capture the entire key as state_key
+#       value_is_object: true
+
+loader:
+  batch_size_rows: 500
+  batch_size_bytes: 1000000
+  commit_interval_seconds: 1.0
+
+bigquery:
+  project_id: "dataland-backend"
+  dataset_id: "rdc_bridge"
+  location: "us-west1"
+  tables:
+    empatica:
+      name: "empatica"
+      description: "Raw telemetry from Empatica wearable devices"
+      partitioning_field: "event_timestamp"
+      partitioning_type: "DAY"
+      clustering_fields:
+        - "device_id"
+      schema:
+        - name: "event_timestamp"
+          type: "TIMESTAMP"
+          mode: "REQUIRED"
+          description: "Timestamp of the event (generated by pipeline)"
+        - name: "device_id"
+          type: "STRING"
+          mode: "REQUIRED"
+          description: "Unique ID of the Empatica watch device"
+        - name: "heart_rate"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Heart rate value"
+        - name: "skin_conductivity"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Skin conductivity value"
+        - name: "skin_temperature"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Skin temperature value"
+        - name: "accelerometer"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Accelerometer value"
+        - name: "steps"
+          type: "INT64"
+          mode: "NULLABLE"
+          description: "Number of steps"
+        - name: "activity"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Number of steps"
+        - name: "counter"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Number of steps"
+        - name: "battery_level_1"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Battery level percentage"
+        - name: "battery_level_2"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Battery level percentage"
+      field_mappings:
+        device_id: "device_id"
+        Heart_Rate_Value: "heart_rate"
+        Skin_Conductivity_Value: "skin_conductivity"
+        Skin_Temperature_Value: "skin_temperature"
+        Accelerometer_Value: "accelerometer"
+        Activity: "activity"
+        Counter: "counter"
+        Steps: "steps"
+        Battery_1: "battery_level"
+      field_types:
+        device_id: "str"
+        Heart_Rate_Value: "int"
+        Skin_Conductivity_Value: "float"
+        Skin_Temperature_Value: "float"
+        Accelerometer_Value: "float"
+        Activity: "int"
+        Counter: "int"
+        Steps: "int"
+        Battery_1: "int"
+        Battery_2: "int"
+
+    blueiot:
+      name: "blueiot"
+      description: "Raw positioning data from BlueIoT tags"
+      partitioning_field: "event_timestamp"
+      partitioning_type: "DAY"
+      clustering_fields:
+        - "device_id"
+      schema:
+        - name: "event_timestamp"
+          type: "TIMESTAMP"
+          mode: "REQUIRED"
+          description: "Timestamp of the event (generated by pipeline)"
+        - name: "device_id"
+          type: "STRING"
+          mode: "REQUIRED"
+          description: "Unique ID of the BlueIoT tag"
+        - name: "position_x"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "X coordinate"
+        - name: "position_y"
+          type: "FLOAT64"
+          mode: "NULLABLE"
+          description: "Y coordinate"
+        - name: "room"
+          type: "INT64"
+          mode: "NULLABLE"
+          description: "Zone or Room ID"
+      field_mappings:
+        device_id: "device_id"
+        BlueIoT_Position: "position" # Array [x, y]
+        Room_ID: "room"
+      field_types:
+        device_id: "str"
+        BlueIoT_Position: "float" # Array elements are floats
+        Room_ID: "int"
+
+    global_state_events:
+      name: "global_state_events"
+      description: "Global state events from RDC"
+      partitioning_field: "event_timestamp"
+      partitioning_type: "DAY"
+      clustering_fields:
+        - "state_key"
+      schema:
+        - name: "event_timestamp"
+          type: "TIMESTAMP"
+          mode: "REQUIRED"
+          description: "Timestamp of the state change"
+        - name: "state_key"
+          type: "STRING"
+          mode: "REQUIRED"
+          description: "Full Redis key representing the state"
+        - name: "state_value"
+          type: "STRING"
+          mode: "NULLABLE"
+          description: "New value of the state key"
+        - name: "ttl_seconds"
+          type: "INT64"
+          mode: "NULLABLE"
+          description: "TTL in seconds at capture time (NULL = no expiry or channel event, positive = TTL)"
+      field_mappings:
+        key: "state_key"
+        value: "state_value"
+      field_types:
+        key: "str"
+        value: "str"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "rdc_bridge.log"

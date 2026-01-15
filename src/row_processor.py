@@ -1,0 +1,192 @@
+"""Event processing and data transformation for row assembly."""
+
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+from .redis_ingestor import RedisDataEvent
+from .row_models import RowInProgress
+
+logger = logging.getLogger(__name__)
+
+
+class RowProcessor:
+    """Handles processing of Redis events and data transformation."""
+
+    def __init__(self, config=None, aggregation_handler=None):
+        """
+        Initialize the row processor.
+        Args:
+            config: Configuration object containing field mappings.
+            aggregation_handler: Ignored in simplified pipeline.
+        """
+        self.config = config
+        self._field_mappings_cache = {}
+        if config and config.bigquery:
+            # Cache field mappings for each table
+            for table_name, table_config in config.bigquery.tables.items():
+                self._field_mappings_cache[table_name] = table_config.field_mappings
+
+    def extract_row_id(self, event: RedisDataEvent) -> Optional[str]:
+        """Extract row ID from the event using the routing rule regex."""
+        if not event.routing_rule:
+            return None
+
+        # For global state events, each key change creates its own row
+        # Use the full key as the row ID
+        if event.routing_rule.target_table == "global_state_events":
+            return event.key_or_channel
+
+        # For other events, use regex parsing
+        if not event.routing_rule.compiled_regex:
+            return None
+
+        match = event.routing_rule.compiled_regex.match(event.key_or_channel)
+        if not match:
+            return None
+
+        match_dict = match.groupdict()
+
+        # Check if this is a ticket_id pattern
+        if "ticket_id" in match_dict:
+            return match_dict.get("ticket_id")
+        # Otherwise use device_id
+        elif "device_id" in match_dict:
+            return match_dict.get("device_id")
+
+        return None
+
+    def extract_data_type(self, event: RedisDataEvent) -> str:
+        """Extract the data type from the event."""
+        key_or_channel = event.key_or_channel
+
+        if "BioSensors" in key_or_channel:
+            return "BioSensors"
+        elif "BlueIoTSensors" in key_or_channel:
+            return "BlueIoTSensors"
+        elif "Status" in key_or_channel:
+            return "Status"
+        elif "EmpaticaDeviceID" in key_or_channel:
+            return "EmpaticaDeviceID"
+        else:
+            parts = key_or_channel.split(":")
+            return parts[-1] if parts else "Unknown"
+
+    async def add_data_to_row(self, row: RowInProgress, event: RedisDataEvent,
+                              data_type: str) -> None:
+        """Add data from the event to the row."""
+        try:
+            # First, try to extract IDs from the key/routing rule
+            # Skip this for global_state_events which doesn't have device_id/ticket_id fields
+            if row.target_table != "global_state_events" and event.routing_rule and event.routing_rule.compiled_regex:
+                match = event.routing_rule.compiled_regex.match(event.key_or_channel)
+                if match:
+                    match_dict = match.groupdict()
+                    if "device_id" in match_dict and "device_id" not in row.data:
+                        row.data["device_id"] = match_dict["device_id"]
+
+            row.received_data_types.add(data_type)
+
+            if row.target_table == "empatica":
+                await self._add_biosensor_data(row, event)
+            elif row.target_table == "blueiot":
+                await self._add_blueiot_sensor_data(row, event)
+            elif row.target_table == "global_state_events":
+                await self._add_global_state_data(row, event)
+            else:
+                logger.warning(f"Unknown target table: {row.target_table}")
+
+            row.last_update = datetime.now(timezone.utc)
+
+        except Exception as e:
+            logger.error(
+                f"Error adding data to row {row.row_id}: {e}", exc_info=True)
+
+    async def _add_biosensor_data(self, row: RowInProgress,
+                                  event: RedisDataEvent) -> None:
+        """Process biosensor data from the event."""
+        try:
+            # Parse biosensor JSON data
+            if isinstance(event.value, str):
+                try:
+                    data = json.loads(event.value)
+                except json.JSONDecodeError:
+                    return
+            elif isinstance(event.value, dict):
+                data = event.value
+            else:
+                return
+
+            # Get field mappings for empatica table
+            field_mappings = self._field_mappings_cache.get("empatica", {})
+            
+            # Apply field mappings parametrically
+            for source_field, target_field in field_mappings.items():
+                if source_field in data:
+                    # Don't overwrite existing data (e.g., device_id from regex)
+                    if target_field not in row.data:
+                        try:
+                            # Convert to float for numeric fields
+                            row.data[target_field] = float(data[source_field])
+                        except (ValueError, TypeError):
+                            # If conversion fails, store as-is
+                            row.data[target_field] = data[source_field]
+
+        except Exception as e:
+            logger.error(f"Error processing biosensor data: {e}")
+
+    async def _add_blueiot_sensor_data(self, row: RowInProgress,
+                                       event: RedisDataEvent) -> None:
+        """Process BlueIoT sensor data (position) from the event."""
+        try:
+            # Parse BlueIoT JSON data
+            if isinstance(event.value, str):
+                try:
+                    data = json.loads(event.value)
+                except json.JSONDecodeError:
+                    return
+            elif isinstance(event.value, dict):
+                data = event.value
+            else:
+                return
+
+            # Get field mappings for blueiot table
+            field_mappings = self._field_mappings_cache.get("blueiot", {})
+            
+            # Apply field mappings parametrically
+            for source_field, target_field in field_mappings.items():
+                if source_field in data:
+                    # Don't overwrite existing data (e.g., device_id from regex)
+                    if target_field not in row.data:
+                        # Special handling for position array
+                        if source_field == "BlueIoT_Position" and isinstance(data[source_field], list):
+                            pos = data[source_field]
+                            if len(pos) >= 1:
+                                row.data["position_x"] = float(pos[0])
+                            if len(pos) >= 2:
+                                row.data["position_y"] = float(pos[1])
+                        else:
+                            # For other fields, try to convert appropriately
+                            try:
+                                row.data[target_field] = float(data[source_field])
+                            except (ValueError, TypeError):
+                                # If conversion fails, store as string
+                                row.data[target_field] = str(data[source_field])
+
+        except Exception as e:
+            logger.error(f"Error processing BlueIoT data: {e}")
+
+    async def _add_global_state_data(self, row: RowInProgress,
+                                     event: RedisDataEvent) -> None:
+        """Add global state event data to the row."""
+        row.data["state_key"] = event.key_or_channel
+        row.data["state_value"] = str(event.value)
+        
+        # Add TTL if present (only for key events, not channel events)
+        if event.ttl is not None:
+            row.data["ttl_seconds"] = event.ttl
+
+    def finalize_nested_structures(self, row: RowInProgress) -> None:
+        """No-op in simplified pipeline."""
+        pass
