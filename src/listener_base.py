@@ -108,7 +108,7 @@ class RedisListenerBase:
         )
         await self.output_queue.put(event)
         ttl_str = f", TTL={ttl}s" if ttl is not None else ""
-        logger.debug(f"Queued {source_type} event: {key_or_channel} -> {rule.target_table}{ttl_str}")
+        logger.debug(f"[QUEUE] Queued {source_type} event: {key_or_channel} -> {rule.target_table}{ttl_str} (queue_size={self.output_queue.qsize()})")
 
     def _decode_if_bytes(self, value: Any) -> str:
         """Decode bytes to string if needed."""

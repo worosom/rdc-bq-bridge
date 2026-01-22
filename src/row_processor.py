@@ -14,14 +14,16 @@ logger = logging.getLogger(__name__)
 class RowProcessor:
     """Handles processing of Redis events and data transformation."""
 
-    def __init__(self, config=None, aggregation_handler=None):
+    def __init__(self, config=None, aggregation_handler=None, device_mapper=None):
         """
         Initialize the row processor.
         Args:
             config: Configuration object containing field mappings.
             aggregation_handler: Ignored in simplified pipeline.
+            device_mapper: DeviceTicketMapper for enriching data with ticket_id.
         """
         self.config = config
+        self.device_mapper = device_mapper
         self._field_mappings_cache = {}
         if config and config.bigquery:
             # Cache field mappings for each table
@@ -132,6 +134,23 @@ class RowProcessor:
                         except (ValueError, TypeError):
                             # If conversion fails, store as-is
                             row.data[target_field] = data[source_field]
+            
+            # Enrich with ticket_id from device_id mapping
+            if self.device_mapper and "device_id" in row.data:
+                ticket_id = await self.device_mapper.get_ticket_for_device(
+                    row.data["device_id"]
+                )
+                if ticket_id:
+                    row.data["ticket_id"] = ticket_id
+                    logger.debug(
+                        f"Enriched biosensor data with ticket_id: "
+                        f"{row.data['device_id']} → {ticket_id}"
+                    )
+                else:
+                    logger.debug(
+                        f"No ticket_id mapping found for device_id: "
+                        f"{row.data['device_id']}"
+                    )
 
         except Exception as e:
             logger.error(f"Error processing biosensor data: {e}")
@@ -173,6 +192,23 @@ class RowProcessor:
                             except (ValueError, TypeError):
                                 # If conversion fails, store as string
                                 row.data[target_field] = str(data[source_field])
+            
+            # Enrich with ticket_id from device_id mapping
+            if self.device_mapper and "device_id" in row.data:
+                ticket_id = await self.device_mapper.get_ticket_for_device(
+                    row.data["device_id"]
+                )
+                if ticket_id:
+                    row.data["ticket_id"] = ticket_id
+                    logger.debug(
+                        f"Enriched BlueIoT data with ticket_id: "
+                        f"{row.data['device_id']} → {ticket_id}"
+                    )
+                else:
+                    logger.debug(
+                        f"No ticket_id mapping found for device_id: "
+                        f"{row.data['device_id']}"
+                    )
 
         except Exception as e:
             logger.error(f"Error processing BlueIoT data: {e}")
@@ -182,6 +218,16 @@ class RowProcessor:
         """Add global state event data to the row."""
         row.data["state_key"] = event.key_or_channel
         row.data["state_value"] = str(event.value)
+        
+        # Extract ticket_id for Visitor events
+        if event.key_or_channel.startswith("Visitors:"):
+            parts = event.key_or_channel.split(":")
+            if len(parts) >= 2:
+                ticket_id = parts[1]
+                row.data["ticket_id"] = ticket_id
+                logger.debug(
+                    f"Extracted ticket_id from key: {event.key_or_channel} → {ticket_id}"
+                )
         
         # Add TTL if present (only for key events, not channel events)
         if event.ttl is not None:

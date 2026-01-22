@@ -200,7 +200,7 @@ async def list_tickets(args: argparse.Namespace) -> None:
 
 
 async def debug_ticket(args: argparse.Namespace) -> None:
-    """Debug device mappings for a specific ticket."""
+    """Debug ticket data and device mappings."""
     try:
         # Load config
         config_path = args.config or get_default_config_path()
@@ -210,86 +210,65 @@ async def debug_ticket(args: argparse.Namespace) -> None:
         exporter = BigQueryExporter(config)
         await exporter.initialize()
         
-        # Query device mappings
-        query = f"""
-SELECT
-    event_timestamp,
-    state_key,
-    state_value as device_id
-FROM `{config.gcp.project_id}.{config.gcp.dataset_id}.global_state_events`
-WHERE state_key = 'Visitors:{args.ticket_id}:EmpaticaDeviceID'
-ORDER BY event_timestamp ASC
-"""
-        
         print(f"\nDebug info for ticket: {args.ticket_id}\n")
-        print("Device mappings in global_state_events:")
-        print("-" * 80)
         
-        df = await exporter._execute_query_to_dataframe(query)
-        
-        if len(df) == 0:
-            print(f"No device mappings found for ticket '{args.ticket_id}'")
-            print("\nPossible issues:")
-            print("  1. Ticket ID doesn't exist in the database")
-            print("  2. No EmpaticaDeviceID was ever assigned to this ticket")
-            print("\nTry running: rdc-export list-tickets")
-            return
-        
-        print(f"\nFound {len(df)} device mapping event(s):\n")
-        for _, row in df.iterrows():
-            timestamp = row['event_timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-            device_id = row['device_id']
-            print(f"  {timestamp}  →  Device: {device_id}")
-        
-        # Now check if there's data for these devices
-        device_ids = df['device_id'].unique().tolist()
-        # Filter out empty device IDs
-        device_ids = [d for d in device_ids if d and d.strip()]
-        
-        if not device_ids:
-            print("\nNo valid device IDs found (all device_ids are empty)")
-            return
-        
-        print(f"\n\nChecking for biometric data for device(s): {device_ids}\n")
-        
-        for table in ['empatica', 'blueiot']:
-            device_list = "', '".join(device_ids)
-            
-            # Get count
-            count_query = f"""
-SELECT COUNT(*) as count
-FROM `{config.gcp.project_id}.{config.gcp.dataset_id}.{table}`
-WHERE device_id IN ('{device_list}')
-"""
-            count_df = await exporter._execute_query_to_dataframe(count_query)
-            count = count_df.iloc[0]['count']
-            
-            # Get timestamp range
-            range_query = f"""
+        # Check each table for data with this ticket_id
+        for table in ['empatica', 'blueiot', 'global_state_events']:
+            # Get count and time range
+            query = f"""
 SELECT 
+    COUNT(*) as count,
     MIN(event_timestamp) as earliest,
     MAX(event_timestamp) as latest
 FROM `{config.gcp.project_id}.{config.gcp.dataset_id}.{table}`
-WHERE device_id IN ('{device_list}')
+WHERE ticket_id = '{args.ticket_id}'
 """
-            range_df = await exporter._execute_query_to_dataframe(range_query)
+            df = await exporter._execute_query_to_dataframe(query)
+            
+            count = df.iloc[0]['count']
             
             if count > 0:
-                earliest = range_df.iloc[0]['earliest']
-                latest = range_df.iloc[0]['latest']
-                print(f"  {table}: {count} rows")
-                print(f"    Time range: {earliest.strftime('%Y-%m-%d %H:%M:%S')} to {latest.strftime('%Y-%m-%d %H:%M:%S')}")
+                earliest = df.iloc[0]['earliest']
+                latest = df.iloc[0]['latest']
+                print(f"{table}:")
+                print(f"  Rows: {count}")
+                print(f"  Time range: {earliest.strftime('%Y-%m-%d %H:%M:%S')} to {latest.strftime('%Y-%m-%d %H:%M:%S')}")
                 
-                # Compare with device assignment times
-                print(f"    Device assignment times:")
-                for _, row in df.iterrows():
-                    if row['device_id'] in device_ids:
-                        assign_time = row['event_timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-                        print(f"      Assigned at: {assign_time}")
-                        if earliest < row['event_timestamp']:
-                            print(f"      ⚠ WARNING: Biometric data exists BEFORE assignment time!")
+                # For biometric tables, show unique device_ids
+                if table in ['empatica', 'blueiot']:
+                    device_query = f"""
+SELECT DISTINCT device_id
+FROM `{config.gcp.project_id}.{config.gcp.dataset_id}.{table}`
+WHERE ticket_id = '{args.ticket_id}'
+ORDER BY device_id
+"""
+                    device_df = await exporter._execute_query_to_dataframe(device_query)
+                    device_ids = device_df['device_id'].tolist()
+                    print(f"  Devices: {', '.join(device_ids)}")
+                
+                # For global_state_events, show sample state keys
+                if table == 'global_state_events':
+                    keys_query = f"""
+SELECT DISTINCT state_key
+FROM `{config.gcp.project_id}.{config.gcp.dataset_id}.{table}`
+WHERE ticket_id = '{args.ticket_id}'
+ORDER BY state_key
+LIMIT 10
+"""
+                    keys_df = await exporter._execute_query_to_dataframe(keys_query)
+                    state_keys = keys_df['state_key'].tolist()
+                    print(f"  Sample state keys ({len(state_keys)}):")
+                    for key in state_keys:
+                        print(f"    - {key}")
+                
+                print()
             else:
-                print(f"  {table}: {count} rows")
+                print(f"{table}: No data found\n")
+        
+        # Summary
+        print("\nSummary:")
+        print("  If no data was found, the ticket_id may not exist in the database.")
+        print("  Try running: rdc-export list-tickets")
         
     except Exception as e:
         logger.error(f"Debug failed: {e}", exc_info=True)

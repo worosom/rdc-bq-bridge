@@ -55,6 +55,7 @@ class RedisConfig:
     port: int
     username: str | None
     password: str | None
+    tracking_ping_interval_seconds: float = 0.5  # Default 500ms
 
 
 @dataclass
@@ -182,7 +183,12 @@ def _validate_gcp_config(gcp_config: Dict[str, Any]) -> GCPConfig:
 
 def _validate_redis_config(redis_config: Dict[str, Any]) -> RedisConfig:
     """Validate Redis configuration section."""
-    return RedisConfig(host=redis_config['host'], port=redis_config['port'], username=redis_config.get('username'), password=redis_config.get('password'))
+    return RedisConfig(
+        host=redis_config['host'],
+        port=redis_config['port'],
+        username=redis_config.get('username'),
+        password=redis_config.get('password')
+    )
 
 
 def _validate_pipeline_config(pipeline_config: Dict[str, Any]) -> PipelineConfig:

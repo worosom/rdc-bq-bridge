@@ -126,6 +126,44 @@ class RoutingManager:
     def get_channel_patterns(self) -> List[str]:
         """Get all unique channel patterns for subscription."""
         return [rule.redis_pattern for rule in self.channel_rules]
+    
+    def get_key_prefixes(self) -> List[str]:
+        """
+        Extract unique prefixes from key routing rules for CLIENT TRACKING.
+        
+        Converts patterns like:
+          - "Visitors:*:Status" → "Visitors:"
+          - "Wearables:Scent:*" → "Wearables:"
+          - "IO:*" → "IO:"
+        
+        Returns:
+            List of unique prefix strings (e.g., ["Visitors:", "Wearables:", "IO:"])
+        """
+        prefixes = set()
+        
+        for rule in self.key_rules:
+            pattern = rule.redis_pattern
+            
+            # Extract prefix before first wildcard
+            if '*' in pattern:
+                prefix = pattern.split('*')[0]
+                # Ensure prefix ends with delimiter (typically ':')
+                if prefix and not prefix.endswith(':'):
+                    # Find the last colon
+                    last_colon = prefix.rfind(':')
+                    if last_colon != -1:
+                        prefix = prefix[:last_colon + 1]
+                
+                if prefix:  # Only add non-empty prefixes
+                    prefixes.add(prefix)
+            else:
+                # Exact match pattern - use entire string as prefix
+                prefixes.add(pattern)
+        
+        sorted_prefixes = sorted(prefixes)
+        logger.info(f"Extracted {len(sorted_prefixes)} unique prefixes for CLIENT TRACKING")
+        
+        return sorted_prefixes
 
     def get_key_patterns(self) -> List[str]:
         """Get all unique key patterns for client tracking."""

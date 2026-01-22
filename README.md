@@ -11,24 +11,44 @@ A high-performance, resilient Python application that synchronizes data from Red
 - **Efficient**: Uses Google BigQuery Storage Write API for high-throughput ingestion
 - **No Hardcoded Schemas**: Table schemas, partitioning, and clustering fully defined in config.yaml
 - **Data Export**: Export BigQuery data in Parquet (for data scientists) or Avro (for Redis replay) formats
+- **Ticket Enrichment**: Automatically enriches biometric data with visitor ticket_id by maintaining device-to-ticket mappings
 
 ## Architecture
 
 The application implements a Streaming ETL pipeline with three main components:
 
-1. **Redis Ingestor**: Listens to Redis invalidation messages (via client-side tracking) and channel subscriptions
+1. **Redis Ingestor**: Listens to Redis invalidation messages (via RESP3 client-side tracking) and channel subscriptions
 2. **Row Processor**: Processes incoming Redis events and transforms data for BigQuery
 3. **BigQuery Loader**: Batches and loads data into dedicated BigQuery tables using the Storage Write API
 
 ### Data Flow
 
 ```
-Redis (Invalidation Messages/Channels) 
-  → Redis Ingestor 
-  → Row Assembler (applies routing rules)
+Redis (Client-Side Tracking Invalidations/Channels) 
+  → Redis Ingestor (RESP3 Push Handlers)
+  → Row Assembler (applies routing rules, enriches with ticket_id)
   → Row Processor (transforms data)
   → BigQuery Loader 
   → BigQuery Tables (empatica, blueiot, global_state_events)
+```
+
+### Ticket Enrichment
+
+The bridge automatically enriches biometric data (empatica, blueiot) with visitor `ticket_id`:
+
+1. **Device-to-Ticket Mappings**: Maintained in-memory by monitoring `Visitors:*:EmpaticaDeviceID` keys in Redis
+2. **Msgpack Encoding**: Values are msgpack-encoded and automatically decoded by the bridge
+3. **Real-time Updates**: Mappings update dynamically as visitors are assigned devices
+4. **Clustered Storage**: BigQuery tables are clustered on `ticket_id` for efficient querying
+
+**Important**: The upstream application must set `Visitors:{ticket_id}:EmpaticaDeviceID` with msgpack-encoded device IDs:
+```python
+# Correct way to set device assignments
+import msgpack
+await redis.set(
+    f"Visitors:{ticket_id}:EmpaticaDeviceID",
+    msgpack.packb(device_id)  # e.g., "E332003716C9"
+)
 ```
 
 ## Prerequisites
@@ -52,10 +72,12 @@ Redis (Invalidation Messages/Channels)
 
 **No manual Redis configuration is required!** The application automatically enables client-side tracking when it starts.
 
-Client-side tracking uses Redis's `CLIENT TRACKING` feature with BCAST mode to receive invalidation messages only when keys actually change, not on every SET operation. This is more efficient than keyspace notifications and reduces duplicate event processing.
+Client-side tracking uses Redis's `CLIENT TRACKING` feature with BCAST mode and RESP3 protocol push handlers to receive invalidation messages only when keys actually change, not on every SET operation. This is more efficient than keyspace notifications and reduces duplicate event processing.
 
 **Requirements:**
-- Redis 6.0 or newer (for client-side tracking support)
+- **Redis 6.0 or newer** (for client-side tracking support)
+- **Redis 8.2 recommended** (tested and optimized for latest features)
+- **Python 3.14** with redis-py >= 5.0 (for RESP3 support)
 
 ### Python Environment
 

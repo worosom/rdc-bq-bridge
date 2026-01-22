@@ -31,10 +31,11 @@ logger = logging.getLogger(__name__)
 class BigQueryLoader:
     """Handles loading data into BigQuery using the Storage Write API."""
 
-    def __init__(self, config: Config, table_name: str, input_queue: asyncio.Queue[AssembledRow]):
+    def __init__(self, config: Config, table_name: str, input_queue: asyncio.Queue[AssembledRow], dry_run: bool = False):
         self.config = config
         self.table_name = table_name
         self.input_queue = input_queue
+        self.dry_run = dry_run
 
         # BigQuery clients
         self.bq_client: Optional[bigquery.Client] = None
@@ -63,16 +64,20 @@ class BigQueryLoader:
 
         self._running = False
 
-        logger.info(f"Initialized BigQueryLoader for table {table_name}")
+        if dry_run:
+            logger.info(f"Initialized BigQueryLoader for table {table_name} in DRY-RUN mode")
+        else:
+            logger.info(f"Initialized BigQueryLoader for table {table_name}")
 
     async def start(self) -> None:
         """Start the BigQuery loader."""
         logger.info(f"Starting BigQuery loader for table {self.table_name}...")
 
         try:
-            # Initialize clients and write stream
-            await self._initialize_clients()
-            await self._create_write_stream()
+            # Initialize clients and write stream (skip in dry-run mode)
+            if not self.dry_run:
+                await self._initialize_clients()
+                await self._create_write_stream()
 
             self._running = True
 
@@ -211,8 +216,8 @@ class BigQueryLoader:
                     rows_received += 1
 
                     # Log every row received for debugging
-                    # logger.info(
-                    #     f"Loader for {self.table_name} received row #{rows_received}, target_table: {row.target_table}")
+                    logger.debug(
+                        f"[LOADER] Table {self.table_name} received row #{rows_received}, target_table: {row.target_table}")
 
                     # Verify this row is for our table (should always be true with dedicated queues)
                     if row.target_table != self.table_name:
@@ -221,15 +226,18 @@ class BigQueryLoader:
                         continue
 
                     await self._add_to_batch(row)
+                    logger.debug(f"[LOADER] Row added to batch (batch_size={len(self.current_batch)})")
 
                 except asyncio.TimeoutError:
                     # Check if we should commit based on time interval
                     if self._should_commit_by_time():
+                        logger.info(f"[LOADER] Committing batch due to time interval (batch_size={len(self.current_batch)})")
                         await self._commit_batch()
                     continue
 
                 # Check if we should commit the batch
                 if self._should_commit_batch():
+                    logger.info(f"[LOADER] Committing batch due to size threshold (batch_size={len(self.current_batch)})")
                     await self._commit_batch()
 
             except asyncio.CancelledError:
@@ -280,6 +288,20 @@ class BigQueryLoader:
             return
 
         batch_size = len(self.current_batch)
+        
+        # In dry-run mode, just log and skip the actual commit
+        if self.dry_run:
+            logger.info(
+                f"[DRY-RUN] Would commit batch of {batch_size} rows to {self.table_name}")
+            # Update statistics as if we committed
+            self.rows_processed += batch_size
+            self.batches_committed += 1
+            self.last_commit_time = time.time()
+            # Clear the batch
+            self.current_batch.clear()
+            self.current_batch_size = 0
+            return
+        
         logger.info(
             f"Committing batch of {batch_size} rows to {self.table_name}")
 
@@ -506,9 +528,10 @@ class BigQueryLoader:
 class BigQueryLoaderManager:
     """Manages multiple BigQuery loaders for different tables."""
 
-    def __init__(self, config: Config, input_queue: asyncio.Queue[AssembledRow]):
+    def __init__(self, config: Config, input_queue: asyncio.Queue[AssembledRow], dry_run: bool = False):
         self.config = config
         self.input_queue = input_queue
+        self.dry_run = dry_run
         self.loaders: Dict[str, BigQueryLoader] = {}
         self.table_queues: Dict[str, asyncio.Queue[AssembledRow]] = {}
         self._running = False
@@ -525,10 +548,14 @@ class BigQueryLoaderManager:
 
             # Create a loader with its dedicated queue
             self.loaders[table_name] = BigQueryLoader(
-                config, table_name, table_queue)
+                config, table_name, table_queue, dry_run=dry_run)
 
-        logger.info(
-            f"Initialized BigQueryLoaderManager with {len(self.loaders)} loaders")
+        if dry_run:
+            logger.info(
+                f"Initialized BigQueryLoaderManager with {len(self.loaders)} loaders in DRY-RUN mode")
+        else:
+            logger.info(
+                f"Initialized BigQueryLoaderManager with {len(self.loaders)} loaders")
 
     async def start(self) -> None:
         """Start all BigQuery loaders."""

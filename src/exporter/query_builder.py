@@ -129,40 +129,17 @@ ORDER BY event_timestamp ASC
         end_time: datetime
     ) -> str:
         """
-        Build query for biometric tables with ticket_id enrichment.
+        Build query for biometric tables with ticket_id.
         
-        This joins with global_state_events to map device_id → ticket_id.
-        Handles device reassignments by using time-based windows.
+        With the new schema, ticket_id is stored directly in the table,
+        so no complex joins are needed anymore!
         """
         return f"""
-WITH device_mappings AS (
-  -- Extract device_id → ticket_id mappings from EmpaticaDeviceID events
-  SELECT
-    REGEXP_EXTRACT(state_key, r'Visitors:([^:]+):EmpaticaDeviceID') as ticket_id,
-    state_value as device_id,
-    event_timestamp as assigned_at,
-    -- Use LEAD to find when this device was reassigned
-    LEAD(event_timestamp) OVER (
-      PARTITION BY state_value
-      ORDER BY event_timestamp
-    ) as valid_until
-  FROM `{self.full_dataset}.global_state_events`
-  WHERE state_key LIKE 'Visitors:%:EmpaticaDeviceID'
-    AND event_timestamp >= TIMESTAMP('{start_time.isoformat()}')
-    AND event_timestamp < TIMESTAMP('{end_time.isoformat()}')
-)
-SELECT
-  data.*,
-  COALESCE(dm.ticket_id, 'UNKNOWN') as ticket_id
-FROM `{self.full_dataset}.{table}` data
-LEFT JOIN device_mappings dm
-  ON data.device_id = dm.device_id
-  -- Join on time window: data timestamp must fall within device assignment period
-  AND data.event_timestamp >= dm.assigned_at
-  AND (data.event_timestamp < dm.valid_until OR dm.valid_until IS NULL)
-WHERE data.event_timestamp >= TIMESTAMP('{start_time.isoformat()}')
-  AND data.event_timestamp < TIMESTAMP('{end_time.isoformat()}')
-ORDER BY data.event_timestamp ASC
+SELECT *
+FROM `{self.full_dataset}.{table}`
+WHERE event_timestamp >= TIMESTAMP('{start_time.isoformat()}')
+  AND event_timestamp < TIMESTAMP('{end_time.isoformat()}')
+ORDER BY event_timestamp ASC
 """.strip()
     
     def _build_global_state_events_ticket_query(
@@ -171,7 +148,12 @@ ORDER BY data.event_timestamp ASC
         start_time: Optional[datetime],
         end_time: Optional[datetime]
     ) -> str:
-        """Build query to get global_state_events for a specific ticket."""
+        """
+        Build query to get global_state_events for a specific ticket.
+        
+        With ticket_id now stored directly in the table, we can use
+        direct equality filtering which is much faster with clustering.
+        """
         time_filter = ""
         if start_time:
             time_filter += f"\n  AND event_timestamp >= TIMESTAMP('{start_time.isoformat()}')"
@@ -181,11 +163,12 @@ ORDER BY data.event_timestamp ASC
         return f"""
 SELECT
     event_timestamp,
+    ticket_id,
     state_key,
     state_value,
     ttl_seconds
 FROM `{self.full_dataset}.global_state_events`
-WHERE state_key LIKE 'Visitors:{ticket_id}:%'{time_filter}
+WHERE ticket_id = '{ticket_id}'{time_filter}
 ORDER BY event_timestamp ASC
 """.strip()
     
@@ -199,33 +182,18 @@ ORDER BY event_timestamp ASC
         """
         Build query to get biometric data for a specific ticket.
         
-        First resolves device_id(s) associated with the ticket,
-        then queries biometric data for those devices.
+        With ticket_id stored directly in the table, this is now a simple
+        direct filter - no joins or CTEs needed!
         """
-        data_time_filter = ""
+        time_filter = ""
         if start_time:
-            data_time_filter += f"\n  AND data.event_timestamp >= TIMESTAMP('{start_time.isoformat()}')"
+            time_filter += f"\n  AND event_timestamp >= TIMESTAMP('{start_time.isoformat()}')"
         if end_time:
-            data_time_filter += f"\n  AND data.event_timestamp < TIMESTAMP('{end_time.isoformat()}')"
+            time_filter += f"\n  AND event_timestamp < TIMESTAMP('{end_time.isoformat()}')"
         
         return f"""
-WITH ticket_devices AS (
-  -- Find all device_ids ever associated with this ticket
-  -- Note: We do NOT apply time filters here, as device assignments
-  -- may have occurred before the requested time range
-  SELECT DISTINCT
-    state_value as device_id
-  FROM `{self.full_dataset}.global_state_events`
-  WHERE state_key = 'Visitors:{ticket_id}:EmpaticaDeviceID'
-    AND state_value IS NOT NULL
-    AND state_value != ''
-)
-SELECT
-  data.*,
-  '{ticket_id}' as ticket_id
-FROM `{self.full_dataset}.{table}` data
-INNER JOIN ticket_devices td
-  ON data.device_id = td.device_id
-WHERE 1=1{data_time_filter}
-ORDER BY data.event_timestamp ASC
+SELECT *
+FROM `{self.full_dataset}.{table}`
+WHERE ticket_id = '{ticket_id}'{time_filter}
+ORDER BY event_timestamp ASC
 """.strip()

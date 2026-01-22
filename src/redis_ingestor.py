@@ -6,14 +6,14 @@ import logging
 from .config import Config
 from .redis_connection import RedisConnectionManager
 from .redis_data_event import RedisDataEvent
-from .redis_listener import KeyspaceListener, ChannelListener
+from .redis_listener import ClientSideTrackingListener, ChannelListener
 from .routing_manager import RoutingManager
 
 logger = logging.getLogger(__name__)
 
 
 class RedisIngestor:
-    """Handles Redis data ingestion through invalidation messages and channel subscriptions."""
+    """Handles Redis data ingestion through client-side tracking invalidations and channel subscriptions."""
 
     def __init__(self, config: Config, output_queue: asyncio.Queue[RedisDataEvent]):
         self.config = config
@@ -25,15 +25,16 @@ class RedisIngestor:
         self.routing_manager = RoutingManager(config)
 
         # Initialize listeners
-        self.keyspace_listener = None
+        self.tracking_listener = None
         self.channel_listener = None
 
         if self.routing_manager.has_key_rules():
-            self.keyspace_listener = KeyspaceListener(
+            self.tracking_listener = ClientSideTrackingListener(
                 self.connection_manager,
                 self.routing_manager,
                 self.output_queue
             )
+            logger.info("Using ClientSideTrackingListener for key events (RESP3)")
 
         if self.routing_manager.has_channel_rules():
             self.channel_listener = ChannelListener(
@@ -44,7 +45,7 @@ class RedisIngestor:
 
     async def start(self) -> None:
         """Start the Redis ingestion process."""
-        logger.info("Starting Redis ingestion...")
+        logger.info("Starting Redis ingestion with client-side tracking (RESP3)...")
 
         try:
             # Initialize Redis connection
@@ -55,16 +56,16 @@ class RedisIngestor:
             # Start ingestion tasks
             tasks = []
 
-            if self.keyspace_listener:
+            if self.tracking_listener:
                 tasks.append(asyncio.create_task(
-                    self.keyspace_listener.start(),
-                    name="keyspace_listener"
+                    self.tracking_listener.start(),
+                    name="tracking_listener"
                 ))
 
             if self.channel_listener:
                 tasks.append(asyncio.create_task(
                     self.channel_listener.start(),
-                    name="channel_subscriber"
+                    name="channel_listener"
                 ))
 
             if not tasks:
@@ -89,8 +90,8 @@ class RedisIngestor:
         self._running = False
 
         # Stop listeners
-        if self.keyspace_listener:
-            await self.keyspace_listener.stop()
+        if self.tracking_listener:
+            await self.tracking_listener.stop()
 
         if self.channel_listener:
             await self.channel_listener.stop()

@@ -1,5 +1,6 @@
 """Main application entry point for the RDC-BigQuery bridge."""
 
+import argparse
 import asyncio
 import logging
 import signal
@@ -10,6 +11,7 @@ from .bq_loader import BigQueryLoaderManager
 from .bq_schema_utils import initialize_schemas
 from .bq_setup import BigQuerySetup, setup_bigquery_infrastructure, verify_bigquery_infrastructure
 from .config import Config, ConfigValidationError, get_default_config_path, load_config
+from .device_ticket_mapper import DeviceTicketMapper
 from .redis_ingestor import RedisDataEvent, RedisIngestor
 from .row_assembler import AssembledRow, RowAssembler
 
@@ -29,23 +31,35 @@ logger = logging.getLogger(__name__)
 class RDCBigQueryBridge:
     """Main application class for the RDC-BigQuery bridge."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, dry_run: bool = False):
         self.config = config
+        self.dry_run = dry_run
 
         # Create queues for inter-component communication
         self.redis_to_assembler_queue: asyncio.Queue[RedisDataEvent] = asyncio.Queue(maxsize=10000)
         self.assembler_to_loader_queue: asyncio.Queue[AssembledRow] = asyncio.Queue(maxsize=5000)
 
+        # Initialize device-to-ticket mapper
+        self.device_mapper = DeviceTicketMapper()
+
         # Initialize components
         self.redis_ingestor = RedisIngestor(config, self.redis_to_assembler_queue)
-        self.row_assembler = RowAssembler(config, self.redis_to_assembler_queue, self.assembler_to_loader_queue)
-        self.bq_loader_manager = BigQueryLoaderManager(config, self.assembler_to_loader_queue)
+        self.row_assembler = RowAssembler(
+            config, 
+            self.redis_to_assembler_queue, 
+            self.assembler_to_loader_queue,
+            device_mapper=self.device_mapper
+        )
+        self.bq_loader_manager = BigQueryLoaderManager(config, self.assembler_to_loader_queue, dry_run=dry_run)
 
         # Task group for managing all components
         self.task_group: Optional[asyncio.TaskGroup] = None
         self._shutdown_event = asyncio.Event()
 
-        logger.info("Initialized RDC-BigQuery Bridge")
+        if dry_run:
+            logger.info("Initialized RDC-BigQuery Bridge in DRY-RUN mode (no data will be written to BigQuery)")
+        else:
+            logger.info("Initialized RDC-BigQuery Bridge")
 
     async def start(self) -> None:
         """Start all components of the bridge."""
@@ -53,6 +67,22 @@ class RDCBigQueryBridge:
 
         # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
+
+        # Bootstrap device-to-ticket mappings from Redis
+        logger.info("Bootstrapping device-to-ticket mappings from Redis...")
+        try:
+            # Get Redis connection for bootstrapping
+            await self.redis_ingestor.connection_manager.create_connection()
+            redis_client = self.redis_ingestor.connection_manager.redis_client
+            
+            if redis_client:
+                count = await self.device_mapper.bootstrap_from_redis(redis_client)
+                logger.info(f"Bootstrap complete: {count} device-ticket mappings loaded")
+            else:
+                logger.warning("Could not get Redis connection for bootstrap")
+        except Exception as e:
+            logger.error(f"Error during device mapper bootstrap: {e}")
+            logger.warning("Continuing without bootstrap - mappings will be populated as events arrive")
 
         # Create tasks for all components
         tasks = []
@@ -198,9 +228,11 @@ class RDCBigQueryBridge:
                 # Log component statistics
                 assembler_stats = self.row_assembler.get_stats()
                 loader_stats = self.bq_loader_manager.get_stats()
+                mapper_stats = self.device_mapper.get_stats()
 
                 logger.info(f"Row assembler stats: {assembler_stats}")
                 logger.info(f"BigQuery loader stats: {loader_stats}")
+                logger.info(f"Device mapper stats: {mapper_stats}")
 
                 # Check for potential issues
                 if redis_queue_size > 8000:
@@ -215,7 +247,7 @@ class RDCBigQueryBridge:
                 logger.error(f"Error in monitoring: {e}")
 
 
-async def main() -> None:
+async def main(dry_run: bool = False) -> None:
     """Main entry point for the application."""
     try:
         # Load configuration
@@ -287,7 +319,7 @@ async def main() -> None:
             # Continue anyway - tables might already exist or be created manually
 
         # Create and start the bridge
-        bridge = RDCBigQueryBridge(config)
+        bridge = RDCBigQueryBridge(config, dry_run=dry_run)
         await bridge.start()
 
     except ConfigValidationError as e:
@@ -305,8 +337,19 @@ async def main() -> None:
 
 def cli_main() -> None:
     """CLI entry point (for use with poetry scripts)."""
+    parser = argparse.ArgumentParser(
+        description='RDC-BigQuery Bridge: Real-time data synchronization from Redis to BigQuery'
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Run in dry-run mode (process data but do not write to BigQuery)'
+    )
+    
+    args = parser.parse_args()
+    
     try:
-        asyncio.run(main())
+        asyncio.run(main(dry_run=args.dry_run))
     except KeyboardInterrupt:
         logger.info("Application interrupted by user")
         sys.exit(0)
