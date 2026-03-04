@@ -25,6 +25,11 @@ logging.basicConfig(
     ]
 )
 
+# Suppress noisy internal redis-py logs
+logging.getLogger('push_response').setLevel(logging.WARNING)
+logging.getLogger('redis').setLevel(logging.WARNING)
+logging.getLogger('redis.asyncio').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 

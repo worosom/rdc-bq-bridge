@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -231,19 +232,55 @@ class FormatWriter:
         if "state_key" in columns:
             # global_state_events table
             for _, row in df.iterrows():
-                # For simple string values, msgpack encode the string
-                value_str = str(row["state_value"])
+                # Parse JSON-encoded values from BigQuery
+                raw_value = row["state_value"]
+                
+                if pd.notna(raw_value) and raw_value:
+                    value_str = str(raw_value)
+                    
+                    # Try to parse as ISO timestamp first (matches encoding logic)
+                    try:
+                        # ISO 8601 timestamp format detection
+                        if 'T' in value_str and ('+' in value_str or 'Z' in value_str or value_str.count(':') >= 2):
+                            typed_value = datetime.fromisoformat(value_str.replace('Z', '+00:00'))
+                        else:
+                            # Not a timestamp, try next parsing method
+                            raise ValueError("Not an ISO timestamp")
+                    except (ValueError, TypeError):
+                        # Try JSON parsing (handles lists, dicts, booleans)
+                        try:
+                            typed_value = json.loads(value_str)
+                        except (json.JSONDecodeError, ValueError):
+                            # Not valid JSON - try numeric types
+                            try:
+                                # Check if it looks like an integer (no decimal point)
+                                if '.' not in value_str:
+                                    typed_value = int(value_str)
+                                else:
+                                    # Try as float
+                                    typed_value = float(value_str)
+                            except (ValueError, TypeError):
+                                # Keep as string
+                                typed_value = value_str
+                else:
+                    # NULL/NaN values become empty string
+                    typed_value = ""
                 
                 # Extract TTL if present
                 ttl = None
                 if "ttl_seconds" in row and pd.notna(row["ttl_seconds"]):
                     ttl = int(row["ttl_seconds"])
                 
+                # Use event_source_type field to determine Redis event type
+                event_type = "key"  # Default to key for backward compatibility
+                if "event_source_type" in row and pd.notna(row["event_source_type"]):
+                    event_type = row["event_source_type"]
+                
                 replay_records.append({
                     "timestamp": int(row["event_timestamp"].timestamp() * 1000),
-                    "type": "key",  # These are Redis key events
+                    "type": event_type,  # Use actual event source type (key or channel)
                     "key": row["state_key"],
-                    "value": msgpack.packb(value_str, use_bin_type=True),
+                    "value": msgpack.packb(typed_value, use_bin_type=True),
                     "ttl": ttl
                 })
         

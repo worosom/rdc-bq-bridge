@@ -2,13 +2,28 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from typing import Any, Dict, Optional
+
+import msgpack
+import pandas as pd
 
 from .redis_ingestor import RedisDataEvent
 from .row_models import RowInProgress
 
 logger = logging.getLogger(__name__)
+
+
+def _json_serial(obj):
+    """JSON serializer for objects not serializable by default json code."""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    elif isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    elif isinstance(obj, msgpack.ext.Timestamp):
+        # Convert msgpack Timestamp to datetime, then to ISO string
+        return obj.to_datetime().isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
 
 
 class RowProcessor:
@@ -85,8 +100,20 @@ class RowProcessor:
                 match = event.routing_rule.compiled_regex.match(event.key_or_channel)
                 if match:
                     match_dict = match.groupdict()
-                    if "device_id" in match_dict and "device_id" not in row.data:
-                        row.data["device_id"] = match_dict["device_id"]
+                    if "device_id" in match_dict:
+                        extracted_device_id = match_dict["device_id"]
+                        if extracted_device_id:
+                            row.data["device_id"] = extracted_device_id
+                            logger.debug(f"Extracted device_id from regex: {extracted_device_id}")
+                        else:
+                            # Regex matched but captured empty device_id - invalid data
+                            raise ValueError(f"Regex matched but device_id is empty for key: {event.key_or_channel}")
+                else:
+                    # Regex failed to match - invalid channel name for this table
+                    raise ValueError(
+                        f"Regex pattern '{event.routing_rule.redis_pattern}' failed to match "
+                        f"key/channel '{event.key_or_channel}' for table {row.target_table}"
+                    )
 
             row.received_data_types.add(data_type)
 
@@ -103,7 +130,10 @@ class RowProcessor:
 
         except Exception as e:
             logger.error(
-                f"Error adding data to row {row.row_id}: {e}", exc_info=True)
+                f"Error adding data to row {row.row_id} for table {row.target_table}, "
+                f"key/channel: {event.key_or_channel}: {e}", 
+                exc_info=True
+            )
 
     async def _add_biosensor_data(self, row: RowInProgress,
                                   event: RedisDataEvent) -> None:
@@ -126,8 +156,13 @@ class RowProcessor:
             # Apply field mappings parametrically
             for source_field, target_field in field_mappings.items():
                 if source_field in data:
-                    # Don't overwrite existing data (e.g., device_id from regex)
-                    if target_field not in row.data:
+                    # For device_id: allow overwrite if it's None or empty (from failed regex extraction)
+                    # For other fields: don't overwrite existing data
+                    should_set = target_field not in row.data or (
+                        target_field == "device_id" and not row.data.get("device_id")
+                    )
+                    
+                    if should_set:
                         try:
                             # Convert to float for numeric fields
                             row.data[target_field] = float(data[source_field])
@@ -176,8 +211,13 @@ class RowProcessor:
             # Apply field mappings parametrically
             for source_field, target_field in field_mappings.items():
                 if source_field in data:
-                    # Don't overwrite existing data (e.g., device_id from regex)
-                    if target_field not in row.data:
+                    # For device_id: allow overwrite if it's None or empty (from failed regex extraction)
+                    # For other fields: don't overwrite existing data
+                    should_set = target_field not in row.data or (
+                        target_field == "device_id" and not row.data.get("device_id")
+                    )
+                    
+                    if should_set:
                         # Special handling for position array
                         if source_field == "BlueIoT_Position" and isinstance(data[source_field], list):
                             pos = data[source_field]
@@ -216,8 +256,39 @@ class RowProcessor:
     async def _add_global_state_data(self, row: RowInProgress,
                                      event: RedisDataEvent) -> None:
         """Add global state event data to the row."""
+        # Set required fields first (before any potential failures)
         row.data["state_key"] = event.key_or_channel
-        row.data["state_value"] = str(event.value)
+        row.data["event_source_type"] = event.source_type
+        
+        # Store state_value as JSON string for human readability
+        # Complex types (lists, dicts) are JSON-encoded for proper parsing
+        # Simple types (strings, numbers) are stored as plain strings
+        try:
+            if event.value is None:
+                row.data["state_value"] = None
+            elif isinstance(event.value, msgpack.ext.Timestamp):
+                # Convert msgpack Timestamp to datetime, then to ISO string
+                row.data["state_value"] = event.value.to_datetime().isoformat()
+            elif isinstance(event.value, (datetime, date, pd.Timestamp)):
+                # Convert timestamps to ISO format strings
+                row.data["state_value"] = event.value.isoformat()
+            elif isinstance(event.value, (dict, list)):
+                # JSON-encode complex types with custom serializer for timestamps
+                # Ensures proper format like ["a", "b"] not "['a', 'b']"
+                row.data["state_value"] = json.dumps(event.value, default=_json_serial)
+            elif isinstance(event.value, bool):
+                # Encode booleans as JSON "true"/"false" for proper parsing
+                row.data["state_value"] = json.dumps(event.value)
+            elif isinstance(event.value, (int, float)):
+                # Store numbers as strings for consistent handling
+                row.data["state_value"] = str(event.value)
+            else:
+                # For strings, store as-is
+                row.data["state_value"] = str(event.value)
+        except Exception as e:
+            # If value encoding fails, store a safe fallback
+            logger.error(f"Failed to encode state_value for key {event.key_or_channel}: {e}")
+            row.data["state_value"] = f"<encoding error: {type(event.value).__name__}>"
         
         # Extract ticket_id for Visitor events
         if event.key_or_channel.startswith("Visitors:"):

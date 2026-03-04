@@ -183,10 +183,13 @@ def _validate_gcp_config(gcp_config: Dict[str, Any]) -> GCPConfig:
 
 def _validate_redis_config(redis_config: Dict[str, Any]) -> RedisConfig:
     """Validate Redis configuration section."""
+    # Support both 'user' and 'username' for backwards compatibility
+    username = redis_config.get('username') or redis_config.get('user')
+    
     return RedisConfig(
         host=redis_config['host'],
         port=redis_config['port'],
-        username=redis_config.get('username'),
+        username=username,
         password=redis_config.get('password')
     )
 

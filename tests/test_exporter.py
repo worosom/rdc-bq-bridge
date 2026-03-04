@@ -122,12 +122,17 @@ class TestQueryBuilder:
             include_ticket_id=True
         )
         
-        # Should include CTE for device mappings
-        assert "WITH device_mappings AS" in query
-        assert "EmpaticaDeviceID" in query
-        assert "LEFT JOIN device_mappings" in query
-        assert "ticket_id" in query
-        assert "LEAD(" in query  # For device reassignment handling
+        # With the new schema, ticket_id is stored directly in the table
+        # No complex joins needed - just a simple SELECT
+        assert "FROM `test-project.test_dataset.empatica`" in query
+        assert "event_timestamp >=" in query
+        assert "2025-12-01" in query
+        assert "2025-12-10" in query
+        assert "ORDER BY event_timestamp" in query
+        
+        # Should NOT include complex joins since ticket_id is enriched at ingestion time
+        assert "WITH device_mappings AS" not in query
+        assert "LEFT JOIN" not in query
     
     def test_ticket_query_for_global_state_events(self):
         """Test ticket query for global_state_events."""
@@ -138,9 +143,12 @@ class TestQueryBuilder:
             end_time=datetime(2025, 12, 10)
         )
         
-        assert "Visitors:TICKET123:%" in query
+        # With ticket_id stored directly, we can filter by equality
+        assert "FROM `test-project.test_dataset.global_state_events`" in query
+        assert "WHERE ticket_id = 'TICKET123'" in query
         assert "event_timestamp >=" in query
         assert "2025-12-01" in query
+        assert "ORDER BY event_timestamp" in query
     
     def test_ticket_query_for_biometric(self):
         """Test ticket query for biometric tables."""
@@ -151,10 +159,16 @@ class TestQueryBuilder:
             end_time=datetime(2025, 12, 10)
         )
         
-        # Should resolve device_ids first
-        assert "WITH ticket_devices AS" in query
-        assert "Visitors:TICKET123:EmpaticaDeviceID" in query
-        assert "INNER JOIN ticket_devices" in query
+        # With ticket_id stored directly in the table, we can query directly
+        assert "FROM `test-project.test_dataset.empatica`" in query
+        assert "WHERE ticket_id = 'TICKET123'" in query
+        assert "event_timestamp >=" in query
+        assert "2025-12-01" in query
+        assert "ORDER BY event_timestamp" in query
+        
+        # Should NOT need CTEs or joins anymore
+        assert "WITH ticket_devices AS" not in query
+        assert "JOIN" not in query
     
     def test_invalid_table_name(self):
         """Test that invalid table names raise error."""
@@ -185,6 +199,83 @@ class TestFormatWriter:
             assert True
         except ImportError:
             pytest.skip("fastavro not installed")
+    
+    def test_global_state_events_avro_transformation_with_key_event(self):
+        """Test that key events are correctly transformed to Avro format."""
+        from src.exporter.format_writer import FormatWriter
+        import pandas as pd
+        from datetime import datetime, timezone
+        
+        # Create test data with a key event
+        df = pd.DataFrame([
+            {
+                "event_timestamp": datetime(2025, 12, 1, 10, 0, 0, tzinfo=timezone.utc),
+                "event_source_type": "key",
+                "ticket_id": "TICKET123",
+                "state_key": "Visitors:TICKET123:Status",
+                "state_value": "Active",
+                "ttl_seconds": None
+            }
+        ])
+        
+        writer = FormatWriter()
+        records = writer._transform_to_replay_format(df)
+        
+        assert len(records) == 1
+        assert records[0]["type"] == "key"
+        assert records[0]["key"] == "Visitors:TICKET123:Status"
+        assert records[0]["ttl"] is None
+    
+    def test_global_state_events_avro_transformation_with_channel_event(self):
+        """Test that channel events are correctly transformed to Avro format."""
+        from src.exporter.format_writer import FormatWriter
+        import pandas as pd
+        from datetime import datetime, timezone
+        
+        # Create test data with a channel event
+        df = pd.DataFrame([
+            {
+                "event_timestamp": datetime(2025, 12, 1, 10, 0, 0, tzinfo=timezone.utc),
+                "event_source_type": "channel",
+                "ticket_id": None,
+                "state_key": "Visitors:Register",
+                "state_value": '{"ticket_id": "TICKET456", "status": "Registered"}',
+                "ttl_seconds": None
+            }
+        ])
+        
+        writer = FormatWriter()
+        records = writer._transform_to_replay_format(df)
+        
+        assert len(records) == 1
+        assert records[0]["type"] == "channel"
+        assert records[0]["key"] == "Visitors:Register"
+        assert records[0]["ttl"] is None
+    
+    def test_global_state_events_avro_transformation_backward_compatibility(self):
+        """Test that missing event_source_type defaults to 'key' for backward compatibility."""
+        from src.exporter.format_writer import FormatWriter
+        import pandas as pd
+        from datetime import datetime, timezone
+        
+        # Create test data without event_source_type (old schema)
+        df = pd.DataFrame([
+            {
+                "event_timestamp": datetime(2025, 12, 1, 10, 0, 0, tzinfo=timezone.utc),
+                "ticket_id": "TICKET123",
+                "state_key": "Visitors:TICKET123:Status",
+                "state_value": "Active",
+                "ttl_seconds": 3600
+            }
+        ])
+        
+        writer = FormatWriter()
+        records = writer._transform_to_replay_format(df)
+        
+        assert len(records) == 1
+        assert records[0]["type"] == "key"  # Should default to "key"
+        assert records[0]["key"] == "Visitors:TICKET123:Status"
+        assert records[0]["ttl"] == 3600
 
 
 # Integration tests would require actual BigQuery access

@@ -59,27 +59,40 @@ class ExportQueryBuilder:
         table: str,
         ticket_id: str,
         start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None
+        end_time: Optional[datetime] = None,
+        ticket_timeframe: Optional[tuple] = None
     ) -> str:
         """
         Generate query to export all data for a specific ticket_id.
         
-        For empatica and blueiot, this resolves device_id(s) associated with
-        the ticket_id and queries based on those device_ids.
+        For empatica and blueiot, this filters by ticket_id directly.
+        For global_state_events, when ticket_timeframe is provided, this exports
+        ALL events within the ticket's timeframe (not just the ticket's own events)
+        to capture complete system state during the ticket's session.
         
         Args:
             table: Table name
             ticket_id: Ticket ID to export
             start_time: Optional start time filter
             end_time: Optional end time filter
+            ticket_timeframe: Optional tuple of (first_seen, last_seen) timestamps
+                            for global_state_events time range query
         
         Returns:
             SQL query string
         """
         if table == "global_state_events":
-            return self._build_global_state_events_ticket_query(
-                ticket_id, start_time, end_time
-            )
+            if ticket_timeframe:
+                # Export ALL events in ticket timeframe, not just ticket's own events
+                first_seen, last_seen = ticket_timeframe
+                return self._build_global_state_events_timeframe_query(
+                    first_seen, last_seen, start_time, end_time
+                )
+            else:
+                # Fallback: export only ticket's own events
+                return self._build_global_state_events_ticket_query(
+                    ticket_id, start_time, end_time
+                )
         
         elif table in ("empatica", "blueiot"):
             return self._build_biometric_ticket_query(
@@ -139,6 +152,44 @@ SELECT *
 FROM `{self.full_dataset}.{table}`
 WHERE event_timestamp >= TIMESTAMP('{start_time.isoformat()}')
   AND event_timestamp < TIMESTAMP('{end_time.isoformat()}')
+ORDER BY event_timestamp ASC
+""".strip()
+    
+    def _build_global_state_events_timeframe_query(
+        self,
+        first_seen,
+        last_seen,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime]
+    ) -> str:
+        """
+        Build query to get ALL global_state_events within ticket's timeframe.
+        
+        This exports all events (from any ticket) that occurred during the ticket's
+        active period, providing complete system state context for Redis replay.
+        
+        User-provided start/end times further restrict the range if specified.
+        """
+        # Use ticket timeframe as base
+        query_start = first_seen
+        query_end = last_seen
+        
+        # Apply user-provided time filters if they narrow the range
+        if start_time and start_time > query_start:
+            query_start = start_time
+        if end_time and end_time < query_end:
+            query_end = end_time
+        
+        return f"""
+SELECT
+    event_timestamp,
+    ticket_id,
+    state_key,
+    state_value,
+    ttl_seconds
+FROM `{self.full_dataset}.global_state_events`
+WHERE event_timestamp >= TIMESTAMP('{query_start.isoformat()}')
+  AND event_timestamp < TIMESTAMP('{query_end.isoformat()}')
 ORDER BY event_timestamp ASC
 """.strip()
     

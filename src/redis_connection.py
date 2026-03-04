@@ -40,13 +40,13 @@ class RedisConnectionManager:
                 client = await self._create_tracking_connection()
 
                 # Test the connection
-                await client.ping()
+                client.ping()
                 logger.info("Redis connection established successfully with client-side tracking (RESP3)")
                 self._reconnect_delay = 1.0  # Reset delay on successful connection
                 self.redis_client = client
                 return client
 
-            except (redis.ConnectionError, redis.TimeoutError) as e:
+            except (redis.ConnectionError, redis.TimeoutError, redis.AuthenticationError) as e:
                 retry_count += 1
                 if retry_count >= max_retries:
                     logger.error(
@@ -57,6 +57,7 @@ class RedisConnectionManager:
                 wait_time = min(2 ** retry_count, 30)
                 logger.warning(
                     f"Redis connection failed (attempt {retry_count}/{max_retries}), retrying in {wait_time}s: {e}")
+                logger.debug(f"Exception details:", exc_info=True)
                 await asyncio.sleep(wait_time)
 
         raise redis.ConnectionError("Could not establish Redis connection")
@@ -71,18 +72,29 @@ class RedisConnectionManager:
         self._invalidation_queue = asyncio.Queue()
         logger.info("Invalidation queue created")
         
+        # RESP3 authentication note:
+        # When using RESP3 with the default user, only pass password (not username)
+        # Redis RESP3 doesn't support username='default' with AUTH command
+        username = self.config.redis.username
+        if username and username.lower() == 'default':
+            username = None  # Don't pass username for default user with RESP3
+        
+        logger.debug(f"Redis connection params: host={self.config.redis.host}, port={self.config.redis.port}, username={username}, password={'***' if self.config.redis.password else None}")
+        
         # Create client with RESP3 protocol
         client = redis.Redis(
             host=self.config.redis.host,
             port=self.config.redis.port,
-            username=self.config.redis.username,
+            username=username,
             password=self.config.redis.password,
             socket_keepalive=True,
-            health_check_interval=30,
+            health_check_interval=0,  # Disable health checks to avoid auth timing issues
             decode_responses=False,  # Keep binary - we have msgpack data
             protocol=3,  # RESP3 protocol for push support
             single_connection_client=True  # Important for consistent tracking
         )
+        
+        logger.debug("Redis client object created, about to enable CLIENT TRACKING")
         
         # Extract prefixes from routing rules
         routing_manager = RoutingManager(self.config)
@@ -139,7 +151,7 @@ class RedisConnectionManager:
         """Test Redis connection."""
         if not self.redis_client:
             raise redis.ConnectionError("No Redis client available")
-        await client.ping()
+        await self.redis_client.ping()
         logger.info("Redis connection test successful")
 
     async def close(self) -> None:

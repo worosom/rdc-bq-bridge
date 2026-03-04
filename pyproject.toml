@@ -49,3 +49,18 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+# Register custom markers
+markers = [
+    "integration: marks tests as integration tests (require BigQuery credentials)",
+]
+
+# Filter out known warnings from dependencies
+filterwarnings = [
+    # Ignore protobuf deprecation warnings from Google libraries (will be fixed in protobuf 5.x)
+    # These are triggered during import and are not in our control
+    "ignore:Type google._upb._message.*:DeprecationWarning",
+    # Alternative catch-all for protobuf warnings
+    "ignore::DeprecationWarning:google",
+]

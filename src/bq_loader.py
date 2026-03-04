@@ -355,77 +355,92 @@ class BigQueryLoader:
             async def request_generator():
                 yield request
 
-            # Append rows using the async client
-            try:
-                response_stream = await self.async_write_client.append_rows(request_generator())
-            except Exception as e:
-                # Check if this is a NOT_FOUND error (stream expired or invalid)
-                if "NOT_FOUND" in str(e) or "404" in str(e):
-                    logger.warning(
-                        f"Write stream not found, recreating stream: {e}")
-                    await self._recreate_write_stream()
+            # Append rows using the async client with retry on stream expiration
+            max_stream_retries = 2
+            for stream_retry in range(max_stream_retries):
+                try:
+                    response_stream = await self.async_write_client.append_rows(request_generator())
+                    
+                    # Process response
+                    async for append_result in response_stream:
+                        # Check if there's an actual error by looking for error code or message
+                        # The error field might be present but empty, which shouldn't be treated as an error
+                        has_error = False
+                        if hasattr(append_result, 'error') and append_result.error:
+                            # Check if the error has meaningful content
+                            error_code = getattr(append_result.error, 'code', None)
+                            error_message = getattr(
+                                append_result.error, 'message', None)
 
-                    # Retry with new stream
-                    request = AppendRowsRequest(
-                        write_stream=self.write_stream.name,
-                        proto_rows=proto_data
-                    )
+                            # Only treat it as an error if there's an actual error code or message
+                            # Error code 0 with no message is not a real error
+                            if (error_code and error_code != 0) or error_message:
+                                has_error = True
 
-                    async def retry_request_generator():
-                        yield request
+                        if has_error:
+                            logger.error(f"BigQuery append failed with error:")
+                            logger.error(
+                                f"  Error code: {append_result.error.code if hasattr(append_result.error, 'code') else 'N/A'}")
+                            logger.error(
+                                f"  Error message: {append_result.error.message if hasattr(append_result.error, 'message') else 'N/A'}")
+                            logger.error(
+                                f"  Error details: {append_result.error.details if hasattr(append_result.error, 'details') else 'N/A'}")
+                            logger.error(f"  Full error object: {append_result.error}")
+                            logger.error(f"  Full append_result: {append_result}")
 
-                    response_stream = await self.async_write_client.append_rows(retry_request_generator())
-                else:
-                    raise
+                            # Try to get row errors if available
+                            if hasattr(append_result, 'row_errors') and append_result.row_errors:
+                                logger.error(
+                                    f"Row errors ({len(append_result.row_errors)}):")
+                                for i, row_error in enumerate(append_result.row_errors):
+                                    logger.error(f"  Row {i}: {row_error}")
 
-            # Process response
-            async for append_result in response_stream:
-                # Check if there's an actual error by looking for error code or message
-                # The error field might be present but empty, which shouldn't be treated as an error
-                has_error = False
-                if hasattr(append_result, 'error') and append_result.error:
-                    # Check if the error has meaningful content
-                    error_code = getattr(append_result.error, 'code', None)
-                    error_message = getattr(
-                        append_result.error, 'message', None)
-
-                    # Only treat it as an error if there's an actual error code or message
-                    # Error code 0 with no message is not a real error
-                    if (error_code and error_code != 0) or error_message:
-                        has_error = True
-
-                if has_error:
-                    logger.error(f"BigQuery append failed with error:")
-                    logger.error(
-                        f"  Error code: {append_result.error.code if hasattr(append_result.error, 'code') else 'N/A'}")
-                    logger.error(
-                        f"  Error message: {append_result.error.message if hasattr(append_result.error, 'message') else 'N/A'}")
-                    logger.error(
-                        f"  Error details: {append_result.error.details if hasattr(append_result.error, 'details') else 'N/A'}")
-                    logger.error(f"  Full error object: {append_result.error}")
-                    logger.error(f"  Full append_result: {append_result}")
-
-                    # Try to get row errors if available
-                    if hasattr(append_result, 'row_errors') and append_result.row_errors:
-                        logger.error(
-                            f"Row errors ({len(append_result.row_errors)}):")
-                        for i, row_error in enumerate(append_result.row_errors):
-                            logger.error(f"  Row {i}: {row_error}")
-
-                    self.errors_count += 1
-                    raise Exception(
-                        f"BigQuery append error: {append_result.error}")
-                else:
-                    # Success case - check if we have an offset which indicates successful append
-                    if hasattr(append_result, 'offset'):
-                        logger.debug(
-                            f"Successfully appended {batch_size} rows")
-                        logger.debug(
-                            f"Append result offset: {append_result.offset}")
+                            self.errors_count += 1
+                            raise Exception(
+                                f"BigQuery append error: {append_result.error}")
+                        else:
+                            # Success case - check if we have an offset which indicates successful append
+                            if hasattr(append_result, 'offset'):
+                                logger.debug(
+                                    f"Successfully appended {batch_size} rows")
+                                logger.debug(
+                                    f"Append result offset: {append_result.offset}")
+                            else:
+                                logger.debug(f"Append completed for {batch_size} rows")
+                                logger.debug(f"Append result: {append_result}")
+                            break  # We only expect one response for our single request
+                    
+                    # If we made it here, the append succeeded - break out of retry loop
+                    break
+                    
+                except Exception as e:
+                    error_str = str(e)
+                    # Check if this is a NOT_FOUND error (stream expired or invalid)
+                    is_stream_not_found = "NOT_FOUND" in error_str or "404" in error_str or "Stream is not found" in error_str
+                    
+                    if is_stream_not_found and stream_retry < max_stream_retries - 1:
+                        logger.warning(
+                            f"Write stream not found (attempt {stream_retry + 1}/{max_stream_retries}), recreating stream: {e}")
+                        await self._recreate_write_stream()
+                        
+                        # Update request with new stream name
+                        request = AppendRowsRequest(
+                            write_stream=self.write_stream.name,
+                            proto_rows=proto_data
+                        )
+                        
+                        # Recreate the request generator for the retry
+                        async def request_generator():
+                            yield request
+                        
+                        # Retry will happen in the next loop iteration
+                        continue
                     else:
-                        logger.debug(f"Append completed for {batch_size} rows")
-                        logger.debug(f"Append result: {append_result}")
-                    break  # We only expect one response for our single request
+                        # Either not a stream error, or we've exhausted retries
+                        if is_stream_not_found:
+                            logger.error(
+                                f"Failed to append after {stream_retry + 1} stream recreation attempts")
+                        raise
 
             # Update statistics
             self.rows_processed += batch_size
@@ -448,7 +463,7 @@ class BigQueryLoader:
         """Convert assembled rows to protobuf format."""
         proto_rows = ProtoRows()
 
-        for row in rows:
+        for i, row in enumerate(rows):
             try:
                 # Create protobuf message from row data
                 proto_message = create_proto_message(
@@ -462,7 +477,10 @@ class BigQueryLoader:
                 proto_rows.serialized_rows.append(serialized_row)
 
             except Exception as e:
-                logger.error(f"Error creating proto message for row: {e}")
+                logger.error(f"Error creating proto message for row {i+1}/{len(rows)}: {e}")
+                logger.error(f"Row data: {row.data}")
+                logger.error(f"Row ID: {row.row_id}")
+                logger.error(f"Target table: {row.target_table}")
                 raise
 
         return proto_rows

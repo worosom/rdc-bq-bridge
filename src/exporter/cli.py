@@ -4,9 +4,8 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 from ..config import load_config, get_default_config_path
@@ -21,21 +20,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def parse_datetime(date_str: str) -> datetime:
+def parse_datetime(date_str: str, default_tz: str = "America/Los_Angeles") -> datetime:
     """Parse datetime string in various formats with optional timezone support.
     
     Supports:
     - ISO 8601 with timezone: "2025-01-09T10:30:00+00:00", "2025-01-09T10:30:00Z"
     - ISO 8601 with named timezone: "2025-01-09T10:30:00[America/New_York]"
-    - ISO 8601 without timezone: "2025-01-09T10:30:00"
-    - Date with space separator: "2025-01-09 10:30:00"
-    - Date only: "2025-01-09"
+    - ISO 8601 without timezone: "2025-01-09T10:30:00" (defaults to specified timezone)
+    - Date with space separator: "2025-01-09 10:30:00" (defaults to specified timezone)
+    - Date only: "2025-01-09" (defaults to specified timezone at 00:00:00)
     
-    If no timezone is specified, the datetime is returned as naive (no timezone).
+    Args:
+        date_str: Date/time string to parse
+        default_tz: Default timezone to use if none specified (default: "America/Los_Angeles")
+    
+    If no timezone is specified in the date string, the default_tz is used.
     """
+    default_tzinfo = ZoneInfo(default_tz)
+    
     # First try fromisoformat for full ISO 8601 support including timezones
     try:
-        return datetime.fromisoformat(date_str)
+        dt = datetime.fromisoformat(date_str)
+        # If no timezone specified, apply default timezone
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=default_tzinfo)
+        return dt
     except ValueError:
         pass
     
@@ -49,7 +58,7 @@ def parse_datetime(date_str: str) -> datetime:
         except (ValueError, Exception):
             pass
     
-    # Fall back to legacy formats (without timezone)
+    # Fall back to legacy formats (without timezone) - apply default timezone
     formats = [
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
@@ -58,13 +67,16 @@ def parse_datetime(date_str: str) -> datetime:
     
     for fmt in formats:
         try:
-            return datetime.strptime(date_str, fmt)
+            dt = datetime.strptime(date_str, fmt)
+            # Apply default timezone
+            return dt.replace(tzinfo=default_tzinfo)
         except ValueError:
             continue
     
     raise ValueError(
         f"Invalid datetime format: {date_str}. "
-        f"Supported formats: ISO 8601 (with/without timezone), YYYY-MM-DD HH:MM:SS, YYYY-MM-DD"
+        f"Supported formats: ISO 8601 (with/without timezone), YYYY-MM-DD HH:MM:SS, YYYY-MM-DD. "
+        f"Dates without timezone default to {default_tz}."
     )
 
 
@@ -76,8 +88,8 @@ async def export_timerange(args: argparse.Namespace) -> None:
         config = load_config(config_path)
         
         # Parse times
-        start_time = parse_datetime(args.start)
-        end_time = parse_datetime(args.end)
+        start_time = parse_datetime(args.start, args.tz)
+        end_time = parse_datetime(args.end, args.tz)
         
         # Parse tables
         tables = args.tables.split(',') if args.tables else ["empatica", "blueiot", "global_state_events"]
@@ -122,8 +134,8 @@ async def export_ticket(args: argparse.Namespace) -> None:
         config = load_config(config_path)
         
         # Parse optional times
-        start_time = parse_datetime(args.start) if args.start else None
-        end_time = parse_datetime(args.end) if args.end else None
+        start_time = parse_datetime(args.start, args.tz) if args.start else None
+        end_time = parse_datetime(args.end, args.tz) if args.end else None
         
         # Parse tables
         tables = args.tables.split(',') if args.tables else ["empatica", "blueiot", "global_state_events"]
@@ -168,13 +180,25 @@ async def list_tickets(args: argparse.Namespace) -> None:
         config_path = args.config or get_default_config_path()
         config = load_config(config_path)
         
+        # Parse optional times
+        start_time_str = None
+        end_time_str = None
+        
+        if args.start:
+            start_time = parse_datetime(args.start, args.tz)
+            start_time_str = start_time.isoformat()
+        
+        if args.end:
+            end_time = parse_datetime(args.end, args.tz)
+            end_time_str = end_time.isoformat()
+        
         # Create exporter
         exporter = BigQueryExporter(config)
         
         # Get tickets
         tickets = await exporter.list_available_tickets(
-            start_time=args.start if args.start else None,
-            end_time=args.end if args.end else None
+            start_time=start_time_str,
+            end_time=end_time_str
         )
         
         # Print results
@@ -182,17 +206,21 @@ async def list_tickets(args: argparse.Namespace) -> None:
             print("No tickets found in the specified time range.")
             return
         
-        print(f"\nFound {len(tickets)} tickets:\n")
-        print(f"{'Ticket ID':<20} {'First Seen':<25} {'Last Seen':<25} {'Events':<10}")
-        print("-" * 85)
+        # Get timezone for display
+        display_tz = ZoneInfo(args.tz)
+        
+        print(f"\nFound {len(tickets)} tickets (times shown in {args.tz}):\n")
+        print(f"{'Ticket ID':<36} {'First Seen':<20} {'Last Seen':<20} {'Events':<10}")
+        print("-" * 86)
         
         for ticket in tickets:
             ticket_id = ticket['ticket_id']
-            first_seen = ticket['first_seen'].strftime("%Y-%m-%d %H:%M:%S")
-            last_seen = ticket['last_seen'].strftime("%Y-%m-%d %H:%M:%S")
+            # Convert to display timezone
+            first_seen = ticket['first_seen'].astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S")
+            last_seen = ticket['last_seen'].astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S")
             event_count = ticket['event_count']
             
-            print(f"{ticket_id:<20} {first_seen:<25} {last_seen:<25} {event_count:<10}")
+            print(f"{ticket_id:<36} {first_seen:<20} {last_seen:<20} {event_count:<10}")
         
     except Exception as e:
         logger.error(f"Failed to list tickets: {e}", exc_info=True)
@@ -294,10 +322,10 @@ Examples:
     --ticket-id TICKET123 \\
     --format avro
   
-  # List available tickets
+  # List available tickets with time filtering
   python -m src.exporter.cli list-tickets \\
-    --start "2025-12-01" \\
-    --end "2025-12-10"
+    --start "2025-12-01T00:00:00" \\
+    --end "2025-12-10T23:59:59"
         """
     )
     
@@ -311,6 +339,13 @@ Examples:
         '--debug',
         action='store_true',
         help='Enable debug logging'
+    )
+    
+    parser.add_argument(
+        '--tz',
+        type=str,
+        default='America/Los_Angeles',
+        help='Default timezone for datetime inputs (default: America/Los_Angeles for PST)'
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')

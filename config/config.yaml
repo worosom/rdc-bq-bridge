@@ -1,7 +1,8 @@
 # GCP Configuration
 gcp:
   project_id: "dataland-backend"
-  dataset_id: "dl_staging_5"
+  dataset_id: "dl_staging_7"
+  # dataset_id: "dl_dev"
   credentials_file: "/home/alex/dataland-backend-rdc-bq-bridge-sa-2dfde8a1840f.json"
 
 # Configuration for RDC-BigQuery Bridge
@@ -86,6 +87,13 @@ pipeline:
       id_parser_regex: "(?P<state_key>.*)"
       value_is_object: true
 
+    - name: "VisitorStatus"
+      redis_source_type: "channel"
+      redis_pattern: "Visitors:*:Status"
+      target_table: "global_state_events"
+      id_parser_regex: "Visitors:(?P<ticket_id>[^:]+):.*"
+      value_is_object: false
+
 loader:
   batch_size_rows: 500
   batch_size_bytes: 1000000
@@ -154,7 +162,6 @@ bigquery:
           mode: "NULLABLE"
           description: "Battery level percentage"
       field_mappings:
-        device_id: "device_id"
         Heart_Rate_Value: "heart_rate"
         Skin_Conductivity_Value: "skin_conductivity"
         Skin_Temperature_Value: "skin_temperature"
@@ -164,6 +171,7 @@ bigquery:
         Steps: "steps"
         Battery_1: "battery_level_1"
         Battery_2: "battery_level_2"
+        # Note: device_id is extracted from channel name via regex, not from JSON payload
       field_types:
         device_id: "str"
         Heart_Rate_Value: "int"
@@ -210,9 +218,9 @@ bigquery:
           mode: "NULLABLE"
           description: "Zone or Room ID"
       field_mappings:
-        device_id: "device_id"
         BlueIoT_Position: "position" # Array [x, y]
         Room_ID: "room"
+        # Note: device_id is extracted from channel name via regex, not from JSON payload
       field_types:
         device_id: "str"
         BlueIoT_Position: "float" # Array elements are floats
@@ -231,6 +239,10 @@ bigquery:
           type: "TIMESTAMP"
           mode: "REQUIRED"
           description: "Timestamp of the state change"
+        - name: "event_source_type"
+          type: "STRING"
+          mode: "REQUIRED"
+          description: "Source of the event: 'key' for CLIENT TRACKING invalidations, 'channel' for PUBSUB messages"
         - name: "ticket_id"
           type: "STRING"
           mode: "NULLABLE"
@@ -242,11 +254,11 @@ bigquery:
         - name: "state_value"
           type: "STRING"
           mode: "NULLABLE"
-          description: "New value of the state key"
+          description: "Value of the state key (JSON-encoded for complex types, plain string for simple types)"
         - name: "ttl_seconds"
           type: "INT64"
           mode: "NULLABLE"
-          description: "TTL in seconds at capture time (NULL = no expiry or channel event, positive = TTL)"
+          description: "TTL in seconds at capture time (NULL = no expiry or key without TTL, positive = TTL set)"
       field_mappings:
         key: "state_key"
         value: "state_value"
@@ -258,4 +270,3 @@ logging:
   level: "INFO"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   file: "rdc_bridge.log"
-

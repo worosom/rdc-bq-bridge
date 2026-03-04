@@ -33,6 +33,9 @@ class RowAssembler:
             device_mapper=device_mapper
         )
         self.rows_processed = 0
+        self.rows_skipped = 0
+        self._last_stats_log = 0
+        self._stats_log_interval = 1000  # Log stats every 1000 rows
         self._running = False
 
     async def start(self) -> None:
@@ -53,7 +56,10 @@ class RowAssembler:
     async def stop(self) -> None:
         """Stop the processor."""
         self._running = False
-        logger.info(f"Stream processor stopped. Processed: {self.rows_processed}")
+        logger.info(
+            f"Stream processor stopped. "
+            f"Processed: {self.rows_processed}, Skipped: {self.rows_skipped}"
+        )
 
     async def _process_events(self) -> None:
         """Main loop."""
@@ -94,7 +100,11 @@ class RowAssembler:
         
         # If no data was extracted, skip
         if not row.data:
-            logger.warning(f"[ASSEMBLER] No data extracted from event for key {event.key_or_channel}, skipping")
+            self.rows_skipped += 1
+            logger.warning(
+                f"[ASSEMBLER] No data extracted from event for key {event.key_or_channel}, skipping "
+                f"(total skipped: {self.rows_skipped})"
+            )
             return
 
         logger.debug(f"[ASSEMBLER] Assembled row for table={target_table}, row_id={row_id}, fields={list(row.data.keys())}")
@@ -108,6 +118,16 @@ class RowAssembler:
         # Send to loader
         await self.output_queue.put(assembled_row)
         self.rows_processed += 1
+        
+        # Periodic stats logging
+        total_rows = self.rows_processed + self.rows_skipped
+        if total_rows - self._last_stats_log >= self._stats_log_interval:
+            skip_rate = (self.rows_skipped / total_rows * 100) if total_rows > 0 else 0
+            logger.info(
+                f"[ASSEMBLER] Stats: processed={self.rows_processed}, "
+                f"skipped={self.rows_skipped} ({skip_rate:.1f}%)"
+            )
+            self._last_stats_log = total_rows
         logger.debug(f"[ASSEMBLER] Row sent to loader queue (queue_size={self.output_queue.qsize()}, total_processed={self.rows_processed})")
     
     async def _handle_device_assignment(self, event: RedisDataEvent) -> None:

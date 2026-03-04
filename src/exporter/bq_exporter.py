@@ -100,52 +100,36 @@ class BigQueryExporter:
         output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Output directory: {output_dir}")
         
-        # For AVRO format, collect all DataFrames first to combine them
-        if export_spec.format == "avro":
-            return await self._export_time_range_combined_avro(
-                export_spec,
-                output_dir
+        # Define query function for time range export
+        def query_fn(table: str) -> str:
+            return self.query_builder.build_time_range_query(
+                table,
+                export_spec.start_time,
+                export_spec.end_time,
+                include_ticket_id=export_spec.include_ticket_id
             )
         
-        # Export each table separately for other formats
-        output_files = {}
+        # Query all tables
+        dataframes = await self._query_tables(export_spec.tables, query_fn)
         
-        for table in export_spec.tables:
-            try:
-                logger.info(f"Exporting table: {table}")
-                
-                # Generate query
-                query = self.query_builder.build_time_range_query(
-                    table,
-                    export_spec.start_time,
-                    export_spec.end_time,
-                    include_ticket_id=export_spec.include_ticket_id
-                )
-                
-                logger.debug(f"Query for {table}:\n{query}")
-                
-                # Execute query and get DataFrame
-                df = await self._execute_query_to_dataframe(query)
-                
-                if len(df) == 0:
-                    logger.warning(f"No data found for table {table} in time range")
-                    continue
-                
-                logger.info(f"Retrieved {len(df)} rows from {table}")
-                
-                # Write to file
-                output_path = await self._write_dataframe(
-                    df,
-                    table,
-                    output_dir,
-                    export_spec.format
-                )
-                
-                output_files[table] = output_path
-                
-            except Exception as e:
-                logger.error(f"Failed to export table {table}: {e}")
-                raise
+        # Write output based on format
+        if export_spec.format == "avro":
+            # Combined AVRO file
+            start_str = export_spec.start_time.strftime("%Y%m%d_%H%M%S")
+            end_str = export_spec.end_time.strftime("%Y%m%d_%H%M%S")
+            filename = f"timerange_{start_str}_to_{end_str}"
+            output_files = await self._write_tables_combined_avro(
+                dataframes,
+                output_dir,
+                filename
+            )
+        else:
+            # Separate files per table
+            output_files = await self._write_tables_separate(
+                dataframes,
+                output_dir,
+                export_spec.format
+            )
         
         logger.info(f"Time range export completed. Files: {list(output_files.values())}")
         return output_files
@@ -156,6 +140,10 @@ class BigQueryExporter:
     ) -> dict[str, Path]:
         """
         Export all data for a specific ticket_id.
+        
+        For biometric tables (empatica, blueiot), exports only events with matching ticket_id.
+        For global_state_events, exports ALL events within the ticket's timeframe (first_seen to last_seen)
+        to capture complete system state during the ticket's session.
         
         Args:
             export_spec: Ticket export specification
@@ -171,6 +159,23 @@ class BigQueryExporter:
             f"tables: {export_spec.tables}, format: {export_spec.format}"
         )
         
+        # Get ticket timeframe (first_seen, last_seen) for global_state_events export
+        logger.info(f"Determining timeframe for ticket {export_spec.ticket_id}")
+        timeframe = await self.get_ticket_timeframe(export_spec.ticket_id)
+        
+        if timeframe is None:
+            raise ValueError(f"Ticket {export_spec.ticket_id} not found in any table")
+        
+        first_seen, last_seen = timeframe
+        logger.info(
+            f"Ticket timeframe: {first_seen.isoformat()} to {last_seen.isoformat()}"
+        )
+        
+        # Store timeframe in export_spec for use in query building
+        # This will override user-provided start/end times for global_state_events
+        export_spec._ticket_first_seen = first_seen
+        export_spec._ticket_last_seen = last_seen
+        
         # Determine output directory
         if export_spec.output_path:
             output_dir = export_spec.output_path
@@ -182,52 +187,43 @@ class BigQueryExporter:
         output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Output directory: {output_dir}")
         
-        # For AVRO format, collect all DataFrames first to combine them
+        # Define query function for ticket export
+        def query_fn(table: str) -> str:
+            # For global_state_events, use ticket timeframe instead of ticket_id filter
+            if table == "global_state_events":
+                return self.query_builder.build_ticket_query(
+                    table,
+                    export_spec.ticket_id,
+                    export_spec.start_time,
+                    export_spec.end_time,
+                    ticket_timeframe=(export_spec._ticket_first_seen, export_spec._ticket_last_seen)
+                )
+            else:
+                return self.query_builder.build_ticket_query(
+                    table,
+                    export_spec.ticket_id,
+                    export_spec.start_time,
+                    export_spec.end_time
+                )
+        
+        # Query all tables
+        dataframes = await self._query_tables(export_spec.tables, query_fn)
+        
+        # Write output based on format
         if export_spec.format == "avro":
-            output_files = await self._export_ticket_combined_avro(
-                export_spec,
-                output_dir
+            # Combined AVRO file
+            output_files = await self._write_tables_combined_avro(
+                dataframes,
+                output_dir,
+                f"{export_spec.ticket_id}_combined"
             )
         else:
-            # Export each table separately for other formats
-            output_files = {}
-            
-            for table in export_spec.tables:
-                try:
-                    logger.info(f"Exporting table: {table}")
-                    
-                    # Generate query
-                    query = self.query_builder.build_ticket_query(
-                        table,
-                        export_spec.ticket_id,
-                        export_spec.start_time,
-                        export_spec.end_time
-                    )
-                    
-                    logger.debug(f"Query for {table}:\n{query}")
-                    
-                    # Execute query and get DataFrame
-                    df = await self._execute_query_to_dataframe(query)
-                    
-                    if len(df) == 0:
-                        logger.warning(f"No data found for table {table} and ticket {export_spec.ticket_id}")
-                        continue
-                    
-                    logger.info(f"Retrieved {len(df)} rows from {table}")
-                    
-                    # Write to file
-                    output_path = await self._write_dataframe(
-                        df,
-                        table,
-                        output_dir,
-                        export_spec.format
-                    )
-                    
-                    output_files[table] = output_path
-                    
-                except Exception as e:
-                    logger.error(f"Failed to export table {table}: {e}")
-                    raise
+            # Separate files per table
+            output_files = await self._write_tables_separate(
+                dataframes,
+                output_dir,
+                export_spec.format
+            )
         
         # Write metadata file
         metadata_path = output_dir / "metadata.json"
@@ -235,6 +231,109 @@ class BigQueryExporter:
         
         logger.info(f"Ticket export completed. Files: {list(output_files.values())}")
         return output_files
+    
+    async def _query_tables(
+        self,
+        tables: list[str],
+        query_fn
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Query multiple tables and return DataFrames.
+        
+        Args:
+            tables: List of table names to query
+            query_fn: Function that takes table name and returns SQL query string
+        
+        Returns:
+            Dictionary mapping table names to DataFrames (only non-empty tables)
+        """
+        dataframes = {}
+        
+        for table in tables:
+            try:
+                logger.info(f"Querying table: {table}")
+                
+                # Generate query using provided function
+                query = query_fn(table)
+                
+                logger.debug(f"Query for {table}:\n{query}")
+                
+                # Execute query and get DataFrame
+                df = await self._execute_query_to_dataframe(query)
+                
+                if len(df) == 0:
+                    logger.warning(f"No data found for table {table}")
+                    continue
+                
+                logger.info(f"Retrieved {len(df)} rows from {table}")
+                dataframes[table] = df
+                
+            except Exception as e:
+                logger.error(f"Failed to query table {table}: {e}")
+                raise
+        
+        return dataframes
+    
+    async def _write_tables_separate(
+        self,
+        dataframes: dict[str, pd.DataFrame],
+        output_dir: Path,
+        format: str
+    ) -> dict[str, Path]:
+        """
+        Write DataFrames to separate files.
+        
+        Args:
+            dataframes: Dictionary mapping table names to DataFrames
+            output_dir: Output directory
+            format: File format (parquet, avro, jsonl)
+        
+        Returns:
+            Dictionary mapping table names to output file paths
+        """
+        output_files = {}
+        
+        for table, df in dataframes.items():
+            output_path = await self._write_dataframe(
+                df,
+                table,
+                output_dir,
+                format
+            )
+            output_files[table] = output_path
+        
+        return output_files
+    
+    async def _write_tables_combined_avro(
+        self,
+        dataframes: dict[str, pd.DataFrame],
+        output_dir: Path,
+        filename: str
+    ) -> dict[str, Path]:
+        """
+        Write DataFrames to a single combined AVRO file ordered by timestamp.
+        
+        Args:
+            dataframes: Dictionary mapping table names to DataFrames
+            output_dir: Output directory
+            filename: Name for the combined file (without extension)
+        
+        Returns:
+            Dictionary with single entry mapping "combined" to output file path
+        """
+        if not dataframes:
+            logger.warning("No data found in any table")
+            return {}
+        
+        # Write combined AVRO file
+        output_path = output_dir / f"{filename}.avro"
+        self.format_writer.write_combined_avro_for_replay(
+            dataframes,
+            output_path,
+            codec=self.export_config.avro_codec
+        )
+        
+        return {"combined": output_path}
     
     async def _execute_query_to_dataframe(self, query: str) -> pd.DataFrame:
         """
@@ -334,129 +433,58 @@ class BigQueryExporter:
         
         logger.info(f"Wrote metadata to {metadata_path}")
     
-    async def _export_time_range_combined_avro(
-        self,
-        export_spec: TimeRangeExport,
-        output_dir: Path
-    ) -> dict[str, Path]:
+
+    async def get_ticket_timeframe(self, ticket_id: str) -> Optional[tuple[pd.Timestamp, pd.Timestamp]]:
         """
-        Export time range data to a single combined AVRO file ordered by timestamp.
+        Get the first_seen and last_seen timestamps for a specific ticket.
+        
+        This queries across all tables (empatica, blueiot, global_state_events) to find
+        the earliest and latest timestamps for events associated with this ticket.
         
         Args:
-            export_spec: Time range export specification
-            output_dir: Output directory
+            ticket_id: Ticket ID to query
         
         Returns:
-            Dictionary with single entry mapping "combined" to output file path
+            Tuple of (first_seen, last_seen) timestamps, or None if ticket not found
         """
-        logger.info("Exporting to combined AVRO file ordered by timestamp")
+        if not self.bq_client:
+            await self.initialize()
         
-        # Collect DataFrames from all tables
-        dataframes = {}
+        # Query all three tables to find min/max timestamps for this ticket
+        query = f"""
+WITH ticket_events AS (
+  SELECT MIN(event_timestamp) as first_seen, MAX(event_timestamp) as last_seen
+  FROM `{self.config.gcp.project_id}.{self.config.gcp.dataset_id}.empatica`
+  WHERE ticket_id = '{ticket_id}'
+  
+  UNION ALL
+  
+  SELECT MIN(event_timestamp) as first_seen, MAX(event_timestamp) as last_seen
+  FROM `{self.config.gcp.project_id}.{self.config.gcp.dataset_id}.blueiot`
+  WHERE ticket_id = '{ticket_id}'
+  
+  UNION ALL
+  
+  SELECT MIN(event_timestamp) as first_seen, MAX(event_timestamp) as last_seen
+  FROM `{self.config.gcp.project_id}.{self.config.gcp.dataset_id}.global_state_events`
+  WHERE ticket_id = '{ticket_id}'
+)
+SELECT 
+  MIN(first_seen) as first_seen,
+  MAX(last_seen) as last_seen
+FROM ticket_events
+WHERE first_seen IS NOT NULL
+"""
         
-        for table in export_spec.tables:
-            try:
-                logger.info(f"Querying table: {table}")
-                
-                # Generate query
-                query = self.query_builder.build_time_range_query(
-                    table,
-                    export_spec.start_time,
-                    export_spec.end_time,
-                    include_ticket_id=export_spec.include_ticket_id
-                )
-                
-                logger.debug(f"Query for {table}:\n{query}")
-                
-                # Execute query and get DataFrame
-                df = await self._execute_query_to_dataframe(query)
-                
-                if len(df) == 0:
-                    logger.warning(f"No data found for table {table} in time range")
-                    continue
-                
-                logger.info(f"Retrieved {len(df)} rows from {table}")
-                dataframes[table] = df
-                
-            except Exception as e:
-                logger.error(f"Failed to query table {table}: {e}")
-                raise
+        df = await self._execute_query_to_dataframe(query)
         
-        if not dataframes:
-            logger.warning("No data found in any table")
-            return {}
+        if len(df) == 0 or pd.isna(df.iloc[0]['first_seen']):
+            return None
         
-        # Write combined AVRO file
-        output_path = output_dir / "combined.avro"
-        self.format_writer.write_combined_avro_for_replay(
-            dataframes,
-            output_path,
-            codec=self.export_config.avro_codec
-        )
+        first_seen = df.iloc[0]['first_seen']
+        last_seen = df.iloc[0]['last_seen']
         
-        return {"combined": output_path}
-    
-    async def _export_ticket_combined_avro(
-        self,
-        export_spec: TicketExport,
-        output_dir: Path
-    ) -> dict[str, Path]:
-        """
-        Export ticket data to a single combined AVRO file ordered by timestamp.
-        
-        Args:
-            export_spec: Ticket export specification
-            output_dir: Output directory
-        
-        Returns:
-            Dictionary with single entry mapping "combined" to output file path
-        """
-        logger.info("Exporting to combined AVRO file ordered by timestamp")
-        
-        # Collect DataFrames from all tables
-        dataframes = {}
-        
-        for table in export_spec.tables:
-            try:
-                logger.info(f"Querying table: {table}")
-                
-                # Generate query
-                query = self.query_builder.build_ticket_query(
-                    table,
-                    export_spec.ticket_id,
-                    export_spec.start_time,
-                    export_spec.end_time
-                )
-                
-                logger.debug(f"Query for {table}:\n{query}")
-                
-                # Execute query and get DataFrame
-                df = await self._execute_query_to_dataframe(query)
-                
-                if len(df) == 0:
-                    logger.warning(f"No data found for table {table} and ticket {export_spec.ticket_id}")
-                    continue
-                
-                logger.info(f"Retrieved {len(df)} rows from {table}")
-                dataframes[table] = df
-                
-            except Exception as e:
-                logger.error(f"Failed to query table {table}: {e}")
-                raise
-        
-        if not dataframes:
-            logger.warning("No data found in any table")
-            return {}
-        
-        # Write combined AVRO file
-        output_path = output_dir / f"{export_spec.ticket_id}_combined.avro"
-        self.format_writer.write_combined_avro_for_replay(
-            dataframes,
-            output_path,
-            codec=self.export_config.avro_codec
-        )
-        
-        return {"combined": output_path}
+        return (first_seen, last_seen)
     
     async def list_available_tickets(
         self,
