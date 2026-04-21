@@ -59,6 +59,7 @@ class TimeRangeExport:
     format: ExportFormat = "parquet"
     output_path: Optional[Path] = None
     include_ticket_id: bool = True  # Enrich biometric data with ticket_id
+    include_initial_state: bool = True  # Prepend snapshot of all key states before start_time (for Avro replay)
     
     def __post_init__(self) -> None:
         """Validate configuration."""

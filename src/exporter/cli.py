@@ -101,7 +101,8 @@ async def export_timerange(args: argparse.Namespace) -> None:
             tables=tables,
             format=args.format,
             output_path=Path(args.output) if args.output else None,
-            include_ticket_id=not args.no_ticket_id
+            include_ticket_id=not args.no_ticket_id,
+            include_initial_state=not args.no_initial_state
         )
         
         # Create exporter
@@ -400,6 +401,11 @@ Examples:
         '--no-ticket-id',
         action='store_true',
         help='Do not enrich biometric data with ticket_id'
+    )
+    timerange_parser.add_argument(
+        '--no-initial-state',
+        action='store_true',
+        help='Do not include initial state snapshot before the time range (for Avro replay exports)'
     )
     
     # export-ticket command

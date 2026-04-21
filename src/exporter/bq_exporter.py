@@ -112,6 +112,21 @@ class BigQueryExporter:
         # Query all tables
         dataframes = await self._query_tables(export_spec.tables, query_fn)
         
+        # For Avro replay exports, prepend initial state snapshot for global_state_events
+        # This captures the last known value of every key before the time range,
+        # so replay produces a complete Redis state (not just the changes during the window)
+        if export_spec.format == "avro" and export_spec.include_initial_state and "global_state_events" in export_spec.tables:
+            snapshot_df = await self._query_initial_state_snapshot(export_spec.start_time)
+            if snapshot_df is not None and len(snapshot_df) > 0:
+                logger.info(f"Prepending {len(snapshot_df)} initial state snapshot rows")
+                if "global_state_events" in dataframes:
+                    dataframes["global_state_events"] = pd.concat(
+                        [snapshot_df, dataframes["global_state_events"]],
+                        ignore_index=True
+                    )
+                else:
+                    dataframes["global_state_events"] = snapshot_df
+        
         # Write output based on format
         if export_spec.format == "avro":
             # Combined AVRO file
@@ -273,6 +288,42 @@ class BigQueryExporter:
                 raise
         
         return dataframes
+    
+    async def _query_initial_state_snapshot(
+        self,
+        start_time
+    ) -> Optional[pd.DataFrame]:
+        """
+        Query the last known value of every global_state_events key before start_time.
+        
+        This provides the initial Redis state at the beginning of a time range export,
+        ensuring that keys which existed before the window are included in the replay.
+        
+        Args:
+            start_time: Start of the export time range
+        
+        Returns:
+            DataFrame with snapshot rows, or None if query fails
+        """
+        try:
+            query = self.query_builder.build_initial_state_snapshot_query(
+                "global_state_events", start_time
+            )
+            logger.info("Querying initial state snapshot (last known value of all keys before start_time)")
+            logger.debug(f"Snapshot query:\n{query}")
+            
+            df = await self._execute_query_to_dataframe(query)
+            
+            if len(df) == 0:
+                logger.info("No prior state found (no events before start_time)")
+                return None
+            
+            logger.info(f"Retrieved {len(df)} keys for initial state snapshot")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Failed to query initial state snapshot: {e}")
+            raise
     
     async def _write_tables_separate(
         self,

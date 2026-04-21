@@ -102,6 +102,50 @@ class ExportQueryBuilder:
         else:
             raise ValueError(f"Unknown table: {table}")
     
+    def build_initial_state_snapshot_query(
+        self,
+        table: str,
+        start_time: datetime
+    ) -> str:
+        """
+        Build a query to get the last known value of every key before start_time.
+        
+        This captures the initial Redis state at the beginning of a time range,
+        so that replay can restore keys that existed before the window started.
+        Uses ROW_NUMBER() to get only the most recent event per state_key.
+        
+        Only applies to global_state_events (key-based state). Biometric tables
+        (empatica, blueiot) are streaming channel data and don't need snapshots.
+        
+        Args:
+            table: Table name (only "global_state_events" is supported)
+            start_time: Start of the time range - snapshot captures state just before this
+        
+        Returns:
+            SQL query string
+        """
+        if table != "global_state_events":
+            raise ValueError(f"Snapshot query only supported for global_state_events, got: {table}")
+        
+        return f"""
+SELECT
+    event_timestamp,
+    event_source_type,
+    state_key,
+    state_value,
+    ttl_seconds
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (PARTITION BY state_key ORDER BY event_timestamp DESC) as rn
+    FROM `{self.full_dataset}.global_state_events`
+    WHERE event_timestamp < TIMESTAMP('{start_time.isoformat()}')
+      AND event_source_type = 'key'
+)
+WHERE rn = 1
+ORDER BY event_timestamp ASC
+""".strip()
+    
     def _build_global_state_events_query(
         self,
         start_time: datetime,
@@ -111,6 +155,7 @@ class ExportQueryBuilder:
         return f"""
 SELECT
     event_timestamp,
+    event_source_type,
     state_key,
     state_value,
     ttl_seconds
@@ -183,6 +228,7 @@ ORDER BY event_timestamp ASC
         return f"""
 SELECT
     event_timestamp,
+    event_source_type,
     ticket_id,
     state_key,
     state_value,
@@ -214,6 +260,7 @@ ORDER BY event_timestamp ASC
         return f"""
 SELECT
     event_timestamp,
+    event_source_type,
     ticket_id,
     state_key,
     state_value,
