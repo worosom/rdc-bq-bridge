@@ -20,7 +20,7 @@ Comprehensive example script that demonstrates:
 
 ```bash
 # Install dependencies
-poetry install
+pip install -r requirements.txt
 
 # Ensure you have valid GCP credentials configured
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
@@ -218,7 +218,7 @@ python examples/export_and_analyze.py
 
 Or install the package:
 ```bash
-poetry install
+pip install -r requirements.txt
 python examples/export_and_analyze.py
 ```
 

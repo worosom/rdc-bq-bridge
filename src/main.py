@@ -341,7 +341,7 @@ async def main(dry_run: bool = False) -> None:
 
 
 def cli_main() -> None:
-    """CLI entry point (for use with poetry scripts)."""
+    """CLI entry point."""
     parser = argparse.ArgumentParser(
         description='RDC-BigQuery Bridge: Real-time data synchronization from Redis to BigQuery'
     )

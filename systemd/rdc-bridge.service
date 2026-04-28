@@ -1,0 +1,30 @@
+[Unit]
+Description=RDC to BigQuery Bridge Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %h expands to the user's home directory (e.g., /home/alex)
+WorkingDirectory=%h/dataland-rdc-bq-bridge
+
+# Application configuration
+Environment="RDC_BRIDGE_CONFIG=%h/dataland-rdc-bq-bridge/config/config.yaml"
+# Uncomment and set your GCP credentials path if needed
+# Environment="GOOGLE_APPLICATION_CREDENTIALS=%h/dataland-rdc-bq-bridge/credentials.json"
+
+# Command to start the application. 
+# If using a python virtual environment, replace the line below with the absolute path to its python binary:
+# ExecStart=%h/dataland-rdc-bq-bridge/.venv/bin/python -m src.main
+ExecStart=/home/alex/.pyenv/versions/rdc-bridge-3.14/bin/python -m src.main
+
+# Auto-restart policies
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
