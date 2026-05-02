@@ -124,10 +124,11 @@ class RedisConnectionManager:
             """
             try:
                 invalidation_count[0] += 1
-                logger.debug(f"[HANDLER] Invalidation #{invalidation_count[0]} received, adding to queue")
+                logger.debug("[HANDLER] Invalidation #%d received, adding to queue", invalidation_count[0])
                 # Put invalidation in queue asynchronously
                 await self._invalidation_queue.put(invalidation_data)
-                logger.debug(f"[HANDLER] Invalidation #{invalidation_count[0]} added to queue (queue size: {self._invalidation_queue.qsize()})")
+                logger.debug("[HANDLER] Invalidation #%d added to queue (queue size: %d)",
+                             invalidation_count[0], self._invalidation_queue.qsize())
             except Exception as e:
                 logger.error(f"Error in invalidation handler: {e}")
         

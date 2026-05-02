@@ -90,24 +90,20 @@ class RoutingManager:
         """Find a routing rule that matches the given key."""
         for rule in self.key_rules:
             if self._matches_pattern(key, rule.redis_pattern):
-                logger.debug(
-                    f"Key '{key}' matches pattern '{rule.redis_pattern}' "
-                    f"from rule '{rule.name}'"
-                )
+                logger.debug("Key '%s' matches pattern '%s' from rule '%s'",
+                             key, rule.redis_pattern, rule.name)
                 return rule
-        logger.debug(f"Key '{key}' did not match any rule patterns")
+        logger.debug("Key '%s' did not match any rule patterns", key)
         return None
 
     def find_matching_channel_rule(self, channel: str) -> Optional[RoutingRule]:
         """Find a routing rule that matches the given channel."""
         for rule in self.channel_rules:
             if self._matches_pattern(channel, rule.redis_pattern):
-                logger.debug(
-                    f"Channel '{channel}' matches pattern '{rule.redis_pattern}' "
-                    f"from rule '{rule.name}'"
-                )
+                logger.debug("Channel '%s' matches pattern '%s' from rule '%s'",
+                             channel, rule.redis_pattern, rule.name)
                 return rule
-        logger.debug(f"Channel '{channel}' did not match any rule patterns")
+        logger.debug("Channel '%s' did not match any rule patterns", channel)
         return None
 
     @staticmethod

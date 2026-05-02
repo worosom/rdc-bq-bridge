@@ -107,7 +107,9 @@ class RowAssembler:
             )
             return
 
-        logger.debug(f"[ASSEMBLER] Assembled row for table={target_table}, row_id={row_id}, fields={list(row.data.keys())}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[ASSEMBLER] Assembled row for table=%s, row_id=%s, fields=%s",
+                         target_table, row_id, list(row.data.keys()))
 
         # Create assembled row
         assembled_row = AssembledRow(
@@ -128,7 +130,8 @@ class RowAssembler:
                 f"skipped={self.rows_skipped} ({skip_rate:.1f}%)"
             )
             self._last_stats_log = total_rows
-        logger.debug(f"[ASSEMBLER] Row sent to loader queue (queue_size={self.output_queue.qsize()}, total_processed={self.rows_processed})")
+        logger.debug("[ASSEMBLER] Row sent to loader queue (queue_size=%d, total_processed=%d)",
+                     self.output_queue.qsize(), self.rows_processed)
     
     async def _handle_device_assignment(self, event: RedisDataEvent) -> None:
         """
@@ -163,7 +166,7 @@ class RowAssembler:
                             device_id = device_id_raw
                     except (msgpack.exceptions.ExtraData, msgpack.exceptions.UnpackException) as e:
                         # Fallback: try as plain string
-                        logger.debug(f"Failed to decode msgpack, trying plain decode: {e}")
+                        logger.debug("Failed to decode msgpack, trying plain decode: %s", e)
                         if isinstance(device_id_raw, bytes):
                             try:
                                 device_id = device_id_raw.decode('utf-8')

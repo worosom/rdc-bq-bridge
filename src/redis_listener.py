@@ -80,7 +80,8 @@ class ClientSideTrackingListener(RedisListenerBase):
                         timeout=ping_interval
                     )
                     
-                    logger.debug(f"[LISTENER] Got invalidation from queue (queue size now: {self._invalidation_queue.qsize()})")
+                    logger.debug("[LISTENER] Got invalidation from queue (queue size now: %d)",
+                                 self._invalidation_queue.qsize())
                     await self._handle_invalidation(invalidation_data)
                     
                 except asyncio.TimeoutError:
@@ -90,7 +91,8 @@ class ClientSideTrackingListener(RedisListenerBase):
                     # Log every 5 minutes (calculate iterations based on ping interval)
                     log_interval = int(300 / ping_interval)  # 300 seconds / ping_interval
                     if ping_counter % log_interval == 0:
-                        logger.debug(f"[LISTENER] Still waiting for invalidations (queue size: {self._invalidation_queue.qsize()})")
+                        logger.debug("[LISTENER] Still waiting for invalidations (queue size: %d)",
+                                     self._invalidation_queue.qsize())
                 
                 # Periodic ping to keep connection alive and trigger processing of pending invalidations
                 # This is CRITICAL: Redis uses lazy processing, so we need regular commands to trigger invalidation delivery
@@ -155,7 +157,9 @@ class ClientSideTrackingListener(RedisListenerBase):
                     key = str(key)
                 invalidated_keys.append(key)
             
-            logger.debug(f"[LISTENER] Received invalidation for {len(invalidated_keys)} key(s): {invalidated_keys}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[LISTENER] Received invalidation for %d key(s): %s",
+                             len(invalidated_keys), invalidated_keys)
             
             # Process each invalidated key
             for key in invalidated_keys:
@@ -168,15 +172,16 @@ class ClientSideTrackingListener(RedisListenerBase):
     async def _process_invalidated_key(self, key: str) -> None:
         """Process a single invalidated key."""
         try:
-            logger.debug(f"[PROCESS] Processing invalidated key: {key}")
-            
+            logger.debug("[PROCESS] Processing invalidated key: %s", key)
+
             # Check routing rule (apply fine-grained pattern matching)
             rule = self.routing_manager.find_matching_key_rule(key)
             if not rule:
-                logger.debug(f"[PROCESS] Key {key} does not match any routing rule pattern - SKIPPING")
+                logger.debug("[PROCESS] Key %s does not match any routing rule pattern - SKIPPING", key)
                 return
-            
-            logger.debug(f"[PROCESS] Key {key} matches rule '{rule.name}' (pattern='{rule.redis_pattern}') -> table={rule.target_table}")
+
+            logger.debug("[PROCESS] Key %s matches rule '%s' (pattern='%s') -> table=%s",
+                         key, rule.name, rule.redis_pattern, rule.target_table)
             
             # Fetch and process the key value and TTL
             result = await self._fetch_key_value(key, rule)
@@ -188,10 +193,10 @@ class ClientSideTrackingListener(RedisListenerBase):
             
             # Check if value actually changed
             if not self._has_value_changed(key, value):
-                logger.debug(f"[PROCESS] Ignoring invalidation for {key}: value unchanged (hash match)")
+                logger.debug("[PROCESS] Ignoring invalidation for %s: value unchanged (hash match)", key)
                 return
-            
-            logger.debug(f"[PROCESS] Value changed for key {key} (TTL={ttl}) - queueing event")
+
+            logger.debug("[PROCESS] Value changed for key %s (TTL=%s) - queueing event", key, ttl)
             
             # Queue the event with TTL
             await self._queue_event("key", key, value, rule, ttl=ttl)
@@ -212,19 +217,20 @@ class ClientSideTrackingListener(RedisListenerBase):
             return None
 
         try:
-            logger.debug(f"[FETCH] Fetching key {key} from Redis...")
-            
+            logger.debug("[FETCH] Fetching key %s from Redis...", key)
+
             # Try string first, then hash
             value = await client.get(key)
             if value is None:
-                logger.debug(f"[FETCH] Key {key} not a string, trying hash...")
+                logger.debug("[FETCH] Key %s not a string, trying hash...", key)
                 value = await client.hgetall(key)
                 if not value:
-                    logger.warning(f"[FETCH] Key {key} not found or empty (may have been deleted)")
+                    logger.warning("[FETCH] Key %s not found or empty (may have been deleted)", key)
                     return None
-                logger.debug(f"[FETCH] Key {key} is a hash with {len(value)} fields")
-            else:
-                logger.debug(f"[FETCH] Key {key} is a string, length={len(value) if isinstance(value, (str, bytes)) else 'unknown'}")
+                logger.debug("[FETCH] Key %s is a hash with %d fields", key, len(value))
+            elif logger.isEnabledFor(logging.DEBUG):
+                length = len(value) if isinstance(value, (str, bytes)) else 'unknown'
+                logger.debug("[FETCH] Key %s is a string, length=%s", key, length)
 
             # Decode the value (handles both strings and msgpack)
             if isinstance(value, bytes):
@@ -236,13 +242,13 @@ class ClientSideTrackingListener(RedisListenerBase):
             try:
                 value = self.decoder.parse_json_if_needed(value, rule.value_is_object)
             except Exception as e:
-                logger.debug(f"Error parsing value for key {key}: {e}")
+                logger.debug("Error parsing value for key %s: %s", key, e)
                 pass
 
             # Fetch TTL
             ttl_raw = await client.ttl(key)
             ttl = None if ttl_raw == -1 else ttl_raw
-            logger.debug(f"[FETCH] Successfully fetched key {key}, TTL={ttl}")
+            logger.debug("[FETCH] Successfully fetched key %s, TTL=%s", key, ttl)
             
             return (value, ttl)
 
@@ -331,7 +337,7 @@ class KeyspaceListener(RedisListenerBase):
             if not key:
                 return
             
-            logger.debug(f"Keyspace event: key={key}, channel={channel}")
+            logger.debug("Keyspace event: key=%s, channel=%s", key, channel)
 
             # Check routing rule
             rule = self.routing_manager.find_matching_key_rule(key)
@@ -347,10 +353,10 @@ class KeyspaceListener(RedisListenerBase):
 
             # Check if value actually changed
             if not self._has_value_changed(key, value):
-                logger.debug(f"Ignoring keyspace event for {key}: value unchanged")
+                logger.debug("Ignoring keyspace event for %s: value unchanged", key)
                 return
 
-            logger.debug(f"Value changed for key {key}, TTL={ttl}, queueing event")
+            logger.debug("Value changed for key %s, TTL=%s, queueing event", key, ttl)
 
             # Queue the event with TTL
             await self._queue_event("key", key, value, rule, ttl=ttl)

@@ -216,8 +216,8 @@ class BigQueryLoader:
                     rows_received += 1
 
                     # Log every row received for debugging
-                    logger.debug(
-                        f"[LOADER] Table {self.table_name} received row #{rows_received}, target_table: {row.target_table}")
+                    logger.debug("[LOADER] Table %s received row #%d, target_table: %s",
+                                 self.table_name, rows_received, row.target_table)
 
                     # Verify this row is for our table (should always be true with dedicated queues)
                     if row.target_table != self.table_name:
@@ -226,7 +226,7 @@ class BigQueryLoader:
                         continue
 
                     await self._add_to_batch(row)
-                    logger.debug(f"[LOADER] Row added to batch (batch_size={len(self.current_batch)})")
+                    logger.debug("[LOADER] Row added to batch (batch_size=%d)", len(self.current_batch))
 
                 except asyncio.TimeoutError:
                     # Check if we should commit based on time interval
@@ -259,8 +259,8 @@ class BigQueryLoader:
         row_size = len(str(row.data).encode('utf-8'))
         self.current_batch_size += row_size
 
-        logger.debug(
-            f"Added row to batch. Batch size: {len(self.current_batch)} rows, ~{self.current_batch_size} bytes")
+        logger.debug("Added row to batch. Batch size: %d rows, ~%d bytes",
+                     len(self.current_batch), self.current_batch_size)
 
     def _should_commit_batch(self) -> bool:
         """Check if the current batch should be committed."""

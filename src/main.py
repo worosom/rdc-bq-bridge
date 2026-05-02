@@ -2,9 +2,12 @@
 
 import argparse
 import asyncio
+import atexit
 import logging
+import queue
 import signal
 import sys
+from logging.handlers import QueueHandler, QueueListener
 from typing import Optional
 
 from .bq_loader import BigQueryLoaderManager
@@ -15,15 +18,27 @@ from .device_ticket_mapper import DeviceTicketMapper
 from .redis_ingestor import RedisDataEvent, RedisIngestor
 from .row_assembler import AssembledRow, RowAssembler
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('rdc_bridge.log')
-    ]
-)
+
+def _configure_logging() -> None:
+    """Route logging through a background thread so file/stream I/O doesn't block the event loop."""
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handlers = [logging.StreamHandler(sys.stdout), logging.FileHandler('rdc_bridge.log')]
+    for h in handlers:
+        h.setFormatter(formatter)
+
+    log_queue: queue.Queue = queue.Queue(-1)
+    listener = QueueListener(log_queue, *handlers, respect_handler_level=False)
+    listener.start()
+    atexit.register(listener.stop)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.addHandler(QueueHandler(log_queue))
+
+
+_configure_logging()
 
 # Suppress noisy internal redis-py logs
 logging.getLogger('push_response').setLevel(logging.WARNING)

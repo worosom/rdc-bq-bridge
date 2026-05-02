@@ -205,8 +205,8 @@ class DeviceTicketMapper:
             self._device_to_ticket[device_id] = ticket_id
             self._ticket_to_device[ticket_id] = device_id
             self._total_updates += 1
-            
-            logger.debug(f"Mapping updated: {device_id} ↔ {ticket_id}")
+
+            logger.debug("Mapping updated: %s ↔ %s", device_id, ticket_id)
 
     async def remove_mapping(self, device_id: str) -> None:
         """
@@ -230,9 +230,9 @@ class DeviceTicketMapper:
                     del self._ticket_to_device[ticket_id]
                 
                 self._total_removals += 1
-                logger.debug(f"Mapping removed: {device_id} ↔ {ticket_id}")
+                logger.debug("Mapping removed: %s ↔ %s", device_id, ticket_id)
             else:
-                logger.debug(f"No mapping found to remove for device: {device_id}")
+                logger.debug("No mapping found to remove for device: %s", device_id)
 
     async def get_ticket_for_device(self, device_id: str) -> Optional[str]:
         """
@@ -250,8 +250,8 @@ class DeviceTicketMapper:
         ticket_id = self._device_to_ticket.get(device_id)
         
         if ticket_id:
-            logger.debug(f"Lookup: {device_id} → {ticket_id}")
-        
+            logger.debug("Lookup: %s → %s", device_id, ticket_id)
+
         return ticket_id
 
     async def get_device_for_ticket(self, ticket_id: str) -> Optional[str]:
@@ -269,8 +269,8 @@ class DeviceTicketMapper:
         device_id = self._ticket_to_device.get(ticket_id)
         
         if device_id:
-            logger.debug(f"Reverse lookup: {ticket_id} → {device_id}")
-        
+            logger.debug("Reverse lookup: %s → %s", ticket_id, device_id)
+
         return device_id
 
     def get_stats(self) -> Dict[str, int]:

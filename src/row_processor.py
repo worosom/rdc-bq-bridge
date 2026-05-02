@@ -104,7 +104,7 @@ class RowProcessor:
                         extracted_device_id = match_dict["device_id"]
                         if extracted_device_id:
                             row.data["device_id"] = extracted_device_id
-                            logger.debug(f"Extracted device_id from regex: {extracted_device_id}")
+                            logger.debug("Extracted device_id from regex: %s", extracted_device_id)
                         else:
                             # Regex matched but captured empty device_id - invalid data
                             raise ValueError(f"Regex matched but device_id is empty for key: {event.key_or_channel}")
